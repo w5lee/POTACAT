@@ -36238,7 +36238,7 @@ function createWindow() {
     y: primary.y + Math.max(0, Math.round((primary.height - defaultH) / 2)),
     width: defaultW,
     height: defaultH,
-    title: `${appLabel} - v${getAppDisplayVersion()}`,
+    title: `${appLabel} | W5LEE - v${getAppDisplayVersion()}`,
     backgroundColor: getThemeWindowBg(),
     ...(isMac ? { titleBarStyle: 'hiddenInset' } : { frame: false }),
     icon: getIconPath(),
@@ -43172,7 +43172,7 @@ function cloudShackNotice(text, kind) {
       minWidth: 760, minHeight: 480, // never smaller than its own controls (N0KAH 2026-10-24)
       width: 1100,
       height: 700,
-      title: `${appLabel} — JTCAT`,
+      title: `${appLabel} — JTCAT | W5LEE`,
       backgroundColor: getThemeWindowBg(),
       show: false,
       ...(isMac ? { titleBarStyle: 'hiddenInset' } : { frame: false }),
