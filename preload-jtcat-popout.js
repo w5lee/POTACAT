@@ -99,6 +99,7 @@ contextBridge.exposeInMainWorld('api', {
   onJtcatSetTxGain: (cb) => ipcRenderer.on('jtcat-set-tx-gain', (_e, level) => cb(level)),
   // RX gain — synced through main (settings.jtcatRxGain): report our slider,
   // receive everyone else's moves (main window, ECHOCAT clients).
+  jtcatAutoTciRxLevel: () => ipcRenderer.invoke('jtcat-auto-tci-rx-level'),
   jtcatSetRxGain: (level) => ipcRenderer.send('jtcat-set-rx-gain', level),
   onJtcatSetRxGain: (cb) => ipcRenderer.on('jtcat-set-rx-gain', (_e, level) => cb(level)),
   jtcatTxComplete: () => ipcRenderer.send('jtcat-tx-complete'),

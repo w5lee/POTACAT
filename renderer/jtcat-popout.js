@@ -5481,7 +5481,8 @@ function _applyPopoutTheme(payload) {
       bandBtn = bestBtn;
     }
     if (!bandBtn) bandBtn = document.querySelector('.jp-band-opt[data-band="20m"]');
-    if (bandBtn) selectBand(bandBtn, false);
+    // The test copy shares the live radio. Its startup follows Zeus's dial.
+    if (bandBtn && !s.tciRxTest && !s.tciRx) selectBand(bandBtn, false);
     if (s.remoteShack) enterRemoteShackMode();
     window.api.jtcatStart(modeSelect.value);
     // IPC is ordered: lands after jtcat-start built the PSK/JTTY slice, so the
@@ -5599,16 +5600,45 @@ function _applyPopoutTheme(payload) {
   // pre-sync builds; the settings value wins when present.
   var jpRxGain = document.getElementById('jp-rx-gain');
   var jpRxGainVal = document.getElementById('jp-rx-gain-val');
+  var jpTciAutoRx = document.getElementById('jp-tci-auto-rx');
+  var jpTciRxResult = document.getElementById('jp-tci-rx-result');
+  jpTciAutoRx.addEventListener('click', async function() {
+    jpTciAutoRx.disabled = true;
+    jpTciRxResult.textContent = 'Measuring and adjusting RX audio…';
+    try {
+      const result = await window.api.jtcatAutoTciRxLevel();
+      if (result.error) {
+        jpTciRxResult.textContent = result.error;
+        return;
+      }
+      const peak = result.clipped ? `${result.clipped} near-full-scale samples` : `${Math.round(result.peakDb)} dBFS peak`;
+      const levels = [`RX ${result.volume.to}%`];
+      if (result.fixedGain) levels.push(`Fixed gain ${result.fixedGain.to} dB`);
+      levels.push(peak);
+      if (result.limited) levels.push('gain limit reached');
+      else if (result.iterationLimit) levels.push('stopped after four adjustments');
+      else levels.push('level OK');
+      jpTciRxResult.textContent = levels.join(' · ');
+    } catch (error) {
+      jpTciRxResult.textContent = error.message;
+    } finally {
+      jpTciAutoRx.disabled = false;
+    }
+  });
   function jpApplyRxGainPct(pct, persistLocal) {
     pct = Math.round(Number(pct));
     if (!isFinite(pct)) return;
     pct = Math.max(0, Math.min(100, pct));
     if (jpRxGain) {
       jpRxGain.value = pct;
+      jpRxGain.style.setProperty('--jp-gain-fill', pct + '%');
       jpRxGainVal.textContent = pct + '%';
     }
     popoutRxGainLevel = pct / 100;
-    if (popoutRxGainNode) popoutRxGainNode.gain.value = popoutRxGainLevel;
+    // The TCI stream already reflects the radio's reported RX volume.
+    if (popoutRxGainNode) {
+      popoutRxGainNode.gain.value = _lastAudioArgs?.audioSource === 'tci' ? 1 : popoutRxGainLevel;
+    }
     if (persistLocal) { try { localStorage.setItem('jtcat-rx-gain', pct); } catch (e) {} }
   }
   var savedRxPct = parseInt(localStorage.getItem('jtcat-rx-gain'), 10);
@@ -5874,6 +5904,7 @@ function _applyPopoutTheme(payload) {
     pct = Math.max(0, Math.min(100, pct));
     if (jpTxGain) {
       jpTxGain.value = pct;
+      jpTxGain.style.setProperty('--jp-gain-fill', pct + '%');
       jpTxGainVal.textContent = pct + '%';
     }
     popoutTxGainLevel = txPwrToGain(pct);
@@ -6048,10 +6079,13 @@ function _applyPopoutTheme(payload) {
   // JTCAT receiving from the WebSDR (#243): the capture is main's 12 kHz
   // 'jtcat-vita49-audio' frames, whatever the rig's own audio source is.
   function jpCaptureSource(s) {
+    if (s && (s.tciRxTest || s.tciRx)) return 'tci';
     return s && s.jtcatRxSource === 'websdr' ? 'websdr' : (s && s.audioSource);
   }
   async function startPopoutAudio(deviceId, audioSource) {
     _lastAudioArgs = { deviceId: deviceId, audioSource: audioSource };
+    jpTciAutoRx.classList.toggle('hidden', audioSource !== 'tci');
+    jpTciRxResult.classList.toggle('hidden', audioSource !== 'tci');
     jpSetDriveRelevance(audioSource);
     _audioStartStage = 'stop-old';
     if (_audioStartWatchdog) clearTimeout(_audioStartWatchdog);
@@ -6075,7 +6109,7 @@ function _applyPopoutTheme(payload) {
     try {
       // Yaesu SCU-LAN10 audio arrives the same way: main forwards it as
       // 'jtcat-vita49-audio' frames at 24 kHz (handleYaesuLanAudioFrame).
-      if (audioSource === 'smartsdr' || audioSource === 'yaesu-lan' || audioSource === 'websdr') {
+      if (audioSource === 'smartsdr' || audioSource === 'yaesu-lan' || audioSource === 'websdr' || audioSource === 'tci') {
         _audioStartStage = 'ctx-create';
         // SmartSDR Direct: audio is the VITA-49 dax_rx stream that main
         // forwards as 'jtcat-vita49-audio' frames. A single AudioWorkletNode
@@ -6100,7 +6134,7 @@ function _applyPopoutTheme(payload) {
           numberOfInputs: 0,
           numberOfOutputs: 1,
           outputChannelCount: [1],
-          processorOptions: audioSource === 'websdr'
+          processorOptions: ['websdr', 'tci'].includes(audioSource)
             ? { sourceRate: 12000 }
             : { sourceRate: 24000 },
         });
@@ -6170,7 +6204,7 @@ function _applyPopoutTheme(payload) {
       // AnalyserNode for waterfall FFT (driven locally, no IPC needed)
       // RX gain node
       popoutRxGainNode = popoutAudioCtx.createGain();
-      popoutRxGainNode.gain.value = popoutRxGainLevel;
+      popoutRxGainNode.gain.value = audioSource === 'tci' ? 1 : popoutRxGainLevel;
       source.connect(popoutRxGainNode);
 
       popoutAnalyser = popoutAudioCtx.createAnalyser();
@@ -6288,6 +6322,7 @@ function _applyPopoutTheme(payload) {
         }
         window.api.jtcatLog('[JTCAT popout] Audio started: ' +
           (audioSource === 'smartsdr' ? 'SmartSDR Direct (VITA-49)' :
+           audioSource === 'tci' ? 'TCI RX1' :
            audioSource === 'websdr' ? 'WebSDR' :
            audioSource === 'icom-network' ? 'Icom network' :
            audioSource === 'yaesu-lan' ? 'Yaesu LAN (SCU-LAN10)' : 'device capture') +

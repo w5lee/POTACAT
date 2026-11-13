@@ -987,6 +987,15 @@ window.api.onRadioState((s) => {
     nbOn = s.nb;
     document.querySelectorAll('.nb-toggle').forEach(b => b.classList.toggle('on', nbOn));
   }
+  if (s.nr != null) nrOn = s.nr;
+  if (s.nrAvailable != null) nrAvailable = s.nrAvailable;
+  zeusNrLevel = s.zeusNrLevel ?? null;
+  document.querySelectorAll('.nr-toggle').forEach(button => {
+    button.hidden = !nrAvailable;
+    button.textContent = ['NR', 'NR1', 'NR2', 'NR3', 'NR4', 'NR5'][zeusNrLevel] || 'NR';
+    button.classList.toggle('on', nrOn);
+    button.setAttribute('aria-pressed', String(nrOn));
+  });
   if (s.power != null) document.getElementById('sec-power').style.display = s.power ? '' : 'none';
   if (s.atu != null) {
     atuOn = s.atu;
@@ -1285,6 +1294,7 @@ vfoTxPwrSelect.addEventListener('change', () => { vfoTxPwrInput(vfoTxPwrSelect);
 
 // --- NB / ATU toggles ---
 let nbOn = false, atuOn = false;
+let nrOn = false, nrAvailable = false, zeusNrLevel = null;
 
 // Radio power (bottom of the dial pane). Power On needs no link: the radio is
 // off, so it cannot answer. Power Off asks once: the first press turns the
@@ -1324,6 +1334,17 @@ function buildRigToggles() {
       document.querySelectorAll('.nb-toggle').forEach(b => b.classList.toggle('on', nbOn));
     });
     row.appendChild(nbBtn);
+
+    const nrBtn = document.createElement('button');
+    nrBtn.className = 'tog toggle-btn nr-toggle' + (nrOn ? ' on' : '');
+    nrBtn.textContent = 'NR';
+    nrBtn.title = 'Noise Reduction';
+    nrBtn.hidden = !nrAvailable;
+    nrBtn.setAttribute('aria-pressed', String(nrOn));
+    nrBtn.addEventListener('click', () => {
+      window.api.rigControl({ action: 'set-nr', value: !nrOn, cycle: zeusNrLevel !== null });
+    });
+    row.appendChild(nrBtn);
 
     const atuBtn = document.createElement('button');
     atuBtn.className = 'tog toggle-btn atu-toggle' + (atuOn ? ' on' : '');

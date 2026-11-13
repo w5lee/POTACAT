@@ -243,5 +243,11 @@
     "serialport": "^13.0.0",
     "sql.js": "^1.14.0",
     "ws": "^8.19.0"
+  },
+  "allowScripts": {
+    "electron": true
+  },
+  "overrides": {
+    "yauzl": "^3.4.0"
   }
 }
