@@ -31,6 +31,8 @@ contextBridge.exposeInMainWorld('api', {
   // `origin` captures the renderer-side call stack so a stray QSY (e.g. the
   // 33 MHz jump) can be traced to its exact caller in the main-process log.
   tune: (frequency, mode, bearing, slicePort) => ipcRenderer.send('tune', { frequency, mode, bearing, slicePort, origin: (new Error()).stack }),
+  // A band button: in voice SSB main picks the band's sideband (#445).
+  tuneByBand: (frequency) => ipcRenderer.send('tune', { frequency, pickSideband: true, origin: (new Error()).stack }),
   onTuneBlocked: (cb) => ipcRenderer.on('tune-blocked', (_e, msg) => cb(msg)),
   // Generic main→renderer toast ({message, warn?, duration?}) — radio-link
   // transitions etc. Rendered via showLogToast in app.js.
@@ -268,6 +270,7 @@ contextBridge.exposeInMainWorld('api', {
   tciTestSetup: (endpoint, apply) => ipcRenderer.invoke('tci-test-setup', endpoint, apply),
   getRigModels: () => ipcRenderer.invoke('get-rig-models'),
   getRigSetupNotes: (q) => ipcRenderer.invoke('get-rig-setup-notes', q),
+  getPacketRigMode: (q) => ipcRenderer.invoke('get-packet-rig-mode', q),
   icomScopeCapture: () => ipcRenderer.invoke('icom-scope-capture'),
   stationSetupGet: (rigId) => ipcRenderer.invoke('station-setup-get', rigId),
   stationSetupReport: (q) => ipcRenderer.invoke('station-setup-report', q),
@@ -428,7 +431,12 @@ contextBridge.exposeInMainWorld('api', {
   channelsGet: () => ipcRenderer.invoke('channels-get'),
   channelsSave: (saved) => ipcRenderer.invoke('channels-save', saved),
   channelsImportCsv: () => ipcRenderer.invoke('channels-import-csv'),
+  channelGo: (id) => ipcRenderer.invoke('channel-go', { id }),
   channelsExportCsv: () => ipcRenderer.invoke('channels-export-csv'),
+  // Favourites (#329, lib/favorites.js): starred Landmarks and Channels, owned by main.
+  favoritesGet: () => ipcRenderer.invoke('favorites-get'),
+  favoriteSet: (kind, id, on) => ipcRenderer.invoke('favorite-set', { kind, id, on }),
+  onFavorites: (cb) => ipcRenderer.on('favorites', (_e, st) => cb(st)),
   fetchDirectory: () => ipcRenderer.send('fetch-directory'),
   getDirectory: () => ipcRenderer.invoke('get-directory'),
   // Events system
@@ -438,6 +446,7 @@ contextBridge.exposeInMainWorld('api', {
   setEventOptIn: (data) => ipcRenderer.invoke('set-event-optin', data),
   setEventWatchlist: (data) => ipcRenderer.invoke('set-event-watchlist', data),
   setEventSnooze: (data) => ipcRenderer.invoke('set-event-snooze', data),
+  setEventBanner: (data) => ipcRenderer.invoke('set-event-banner', data), // { eventId, shown }
   getEventProgress: (eventId) => ipcRenderer.invoke('get-event-progress', eventId),
   markEventRegion: (data) => ipcRenderer.invoke('mark-event-region', data),
   setEventItem: (data) => ipcRenderer.invoke('set-event-item', data),
@@ -515,7 +524,7 @@ contextBridge.exposeInMainWorld('api', {
   settingsSaveStatus: () => ipcRenderer.invoke('settings-save-status'),
   winlinkListArdopDevices: () => ipcRenderer.invoke('winlink-list-ardop-devices'),
   winlinkAccountCheck: (call) => ipcRenderer.invoke('winlink-account-check', call),
-  winlinkVaraFind: (kind) => ipcRenderer.invoke('winlink-vara-find', { kind }),
+  winlinkVaraFind: (kind, o) => ipcRenderer.invoke('winlink-vara-find', { kind, host: o && o.host, port: o && o.port }),
   winlinkVaraSetup: (kind, devices, labels) => ipcRenderer.invoke('winlink-vara-setup', { kind, devices, ...(labels || {}) }),
   winlinkAudioRig: () => ipcRenderer.invoke('winlink-audio-rig'),
   winlinkRegister: (o) => ipcRenderer.invoke('winlink-register', o),

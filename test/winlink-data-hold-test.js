@@ -82,11 +82,45 @@ test('a mode with no data form, or one already in it, is unchanged', () => {
   for (const m of ['DIGU', 'DIGL', 'CW', 'RTTY', '']) assert.strictEqual(S.dataFormOf(m), m);
 });
 
+console.log('one switch per session (#300)');
+test('a session that already asked for DATA keys as the radio is, whatever it reports', () => {
+  assert.strictEqual(S.sessionDataPlan({ hold: true, inData: false, tried: true }), 'keep');
+  assert.strictEqual(S.sessionDataPlan({ hold: true, inData: true, tried: true }), 'keep');
+  assert.strictEqual(S.sessionDataPlan({ hold: true, inData: false, tried: false }), 'switch-hold');
+  assert.strictEqual(S.sessionDataPlan({ hold: false, inData: false, tried: true }), 'switch-restore', 'voice and SSTV are not a session');
+});
+test('NA4DQ IC-7100 on rigctld: the radio reads back FM after every switch; 79 overs send ONE mode command, not 70', () => {
+  // A radio that never reports DATA: before, every over planned switch-hold.
+  let tried = false; const cmds = [];
+  for (let i = 0; i < 79; i++) {
+    const plan = S.sessionDataPlan({ hold: true, inData: false, tried });
+    if (plan === 'switch-hold') { cmds.push('DIGFM'); tried = true; }
+  }
+  assert.deepStrictEqual(cmds, ['DIGFM']);
+});
+test('main.js: the key-down marks the session as asked; FM-D is asked for before Pat dials, off the key-down', () => {
+  const p = fnBody(main, 'handleRemotePtt');
+  assert.ok(/if \(_dataPlan === 'switch-hold'\) _winlinkDataAskedFor = _winlinkSessionSeq;/.test(p));
+  assert.ok(/not a DATA mode, after this session asked for one — keying as it is/.test(p), 'said once, with what to check');
+  const e = fnBody(main, 'winlinkEnterFmDataBeforeDial');
+  // Which rig, and which mode name, is lib/packet-rig-mode.js (#128); test/packet-rig-mode-test.js runs this function.
+  assert.ok(/if \(!pm \|\| pm\.want !== 'fmdata' \|\| !pm\.dataMode\) return;/.test(e), 'FM data sessions only: HF sessions QSY in DIGU already');
+  assert.ok(/if \(rep\.data && \(pm\.link === 'civ' \|\| rep\.at > tunedAt\)\) \{ note\('already'\); return; \}/.test(e), 'nothing sent to a radio already in data');
+  assert.ok(e.indexOf('_winlinkDataAskedFor = _winlinkSessionSeq;') < e.indexOf('cat.setModeOnly(pm.dataMode'), 'marked before it is sent');
+  assert.ok(/noAnchor: true/.test(e), 'an Icom memory channel keeps its duplex: no frequency write');
+  const s = fnBody(main, 'winlinkStartSession');
+  const tune = s.indexOf("{ origin: 'Winlink session' }");
+  const enter = s.indexOf('await winlinkEnterFmDataBeforeDial(mode, pm, tunedAt);');
+  const dial = s.indexOf('await patClient.connect(url)');
+  assert.ok(tune > 0 && enter > tune && dial > enter, 'after the QSY, before Pat dials');
+  assert.ok(/await winlinkEnterFmDataBeforeDial\(mode, pm, tunedAt\);\n\s*if \(!live\(\)\) throw cancelled\(\);/.test(s), 'a stopped attempt goes no further');
+});
+
 console.log('main.js wiring');
 const ptt = fnBody(main, 'handleRemotePtt');
 test('handleRemotePtt asks the plan for a Winlink key-down, judged on the radio\'s DATA report', () => {
   assert.ok(/const _holdData = forceData && opts\.txKind === 'winlink';/.test(ptt), 'hold = a forced-DATA Winlink frame');
-  assert.ok(/PttModeSwap\.sessionDataPlan\(\{ hold: _holdData, inData: [^}]*pttModeReport\(\)/.test(ptt), 'judged on pttModeReport()');
+  assert.ok(/const _inData = !!\(pttModeReport\(\) \|\| \{\}\)\.data;/.test(ptt) && /PttModeSwap\.sessionDataPlan\(\{ hold: _holdData, inData: _inData, tried: _holdData && _winlinkDataAskedFor === _winlinkSessionSeq \}\)/.test(ptt), 'judged on pttModeReport(), and on whether this session already asked (#300)');
 });
 test('a frame with the radio in DATA keys straight away, logged once per session', () => {
   assert.ok(/_dataPlan === 'keep'/.test(ptt));
@@ -273,7 +307,7 @@ test('the dial moved by hand between attempts: the original return point is kept
 console.log('main.js wiring of the return');
 test('session end keeps the return point while the mail window is open, and says so', () => {
   const end = fnBody(main, 'winlinkEndSession');
-  assert.ok(/WinlinkReturn\.atSessionEnd\(\{ tuned: s\.tuned, returnTo: s\.returnTo, windowOpen: winlinkMailWindowOpen\(\) \}\)/.test(end));
+  assert.ok(/WinlinkReturn\.atSessionEnd\(\{ tuned: s\.tuned, returnTo: s\.returnTo, windowOpen: winlinkMailWindowOpen\(\) \|\| retryWill \}\)/.test(end), 'a pending automatic retry (#425) keeps the radio like an open window');
   assert.ok(/=== 'keep'\) winlinkKeepReturn\(s\.returnTo\)/.test(end));
   assert.ok(/else if \(_ret === 'return'\) setTimeout\(\(\) => winlinkRestoreDial\(s\.returnTo\), 1500\);/.test(end), 'goes back at once only with no mail window');
   const keep = fnBody(main, 'winlinkKeepReturn');
@@ -314,6 +348,25 @@ test('quit goes back first when it can, inside the cleanup budget, before the CA
   assert.ok(/_winlinkPreviewReturnTo = null;/.test(q), 'once: the second before-quit carries on');
   assert.ok(/not going back to/.test(q), 'a skipped return is logged');
   assert.ok(q.indexOf('tuneRadio(') > 0 && /setTimeout\(then, v\.waitMs\)/.test(q));
+});
+
+test('#455: Pat\'s QSX as a session is torn down is refused quietly; a stray tune later is still logged', () => {
+  const R = require('../lib/winlink-return');
+  assert.strictEqual(R.patTuneRefusalLogged({ msSinceSessionEnd: 1000 }), false, 'teardown QSX');
+  assert.strictEqual(R.patTuneRefusalLogged({ msSinceSessionEnd: R.TEARDOWN_QUIET_MS - 1 }), false);
+  assert.strictEqual(R.patTuneRefusalLogged({ msSinceSessionEnd: R.TEARDOWN_QUIET_MS }), true);
+  assert.strictEqual(R.patTuneRefusalLogged({ msSinceSessionEnd: Date.now() }), true, 'no session since start');
+  assert.strictEqual(R.patTuneRefusalLogged({}), true);
+  const shim = fnBody(main, 'startWinlinkShim');
+  assert.ok(/if \(WinlinkReturn\.patTuneRefusalLogged\(\{ msSinceSessionEnd: Date\.now\(\) - _winlinkShimDisarmedAt \}\)\) winlinkLog\(`refused Pat's tune/.test(shim));
+  assert.ok(/if \(_winlinkShimArmed\) _winlinkShimDisarmedAt = endedAt;/.test(fnBody(main, 'winlinkEndSession')));
+  assert.ok(/if \(_winlinkShimArmed\) _winlinkShimDisarmedAt = Date\.now\(\);/.test(fnBody(main, 'stopWinlinkShim')));
+});
+test('#455: "failed after it was stopped — kept as the reason" is logged only when it is kept', () => {
+  const i = main.indexOf('failed after it was stopped');
+  assert.ok(i > 0);
+  const before = main.slice(main.lastIndexOf('if (ls && !ls.ok && !dialed', i), i);
+  assert.ok(before.length > 0 && before.length < 200, 'the line sits inside the branch that keeps the reason');
 });
 
 console.log(`\nWinlink DATA hold (#187): ${pass} passed, ${fail} failed`);

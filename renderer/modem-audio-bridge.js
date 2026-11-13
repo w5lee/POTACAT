@@ -3,8 +3,10 @@
 // Two SIDES, each its own capture + playback pair, each the same code:
 //
 // radio: RX: the rig's input device → AudioWorklet 'modem-capture' → 20 ms
-//            batches → main (modem-bridge-rx) → ModemAudioServer → the modem.
-//        TX: main (modem-bridge-tx, 24 kHz chunks from the server) →
+//            batches → the modem audio lane (its own port, #187) → the modem;
+//            also to main (modem-bridge-rx) for the meter and VARA's cable.
+//        TX: the modem audio lane (lib/modem-audio-lane.js, on a port handed
+//            to the worklet itself) or main (modem-bridge-tx) →
 //            AudioWorklet 'modem-play' ring → GainNode(txGain) → an
 //            AudioContext whose sink is the rig's output device (setSinkId).
 // cable: the virtual audio cable VARA is wired to (rig.modemCable). Capture =
@@ -88,10 +90,13 @@ function makeSide({ name, what, where, rx, status }) {
     if (playCtx.state === 'suspended') await playCtx.resume();
     await playCtx.audioWorklet.addModule('modem-play-worklet.js');
     playNode = new AudioWorkletNode(playCtx, 'modem-play', { numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [1], processorOptions: { sourceRate: 24000 } });
+    // The worklet answers an over's end with what went wrong inside it, if anything.
+    playNode.port.onmessage = (e) => { if (e.data && e.data.over) status({ txOver: e.data.over }); };
     playGain = playCtx.createGain();
     playGain.gain.value = (typeof c.txGain === 'number' && isFinite(c.txGain)) ? Math.max(0, Math.min(2, c.txGain)) : 1;
     playNode.connect(playGain); playGain.connect(playCtx.destination);
-    return { playbackLabel: (await labelFor('audiooutput', c.outputId)) || c.outputId };
+    // The rate the output actually runs at after setSinkId (#295 L5: a Mac output at 44.1 kHz).
+    return { playbackLabel: (await labelFor('audiooutput', c.outputId)) || c.outputId, playbackSampleRate: playCtx.sampleRate };
   }
 
   function stopPlayback() {
@@ -136,13 +141,34 @@ function makeSide({ name, what, where, rx, status }) {
     playNode.port.postMessage(pcm);
   }
 
+  /** A port to the modem audio lane, for one worklet: moved into it (#187). */
+  function lanePort(kind, port) {
+    const node = kind === 'tx' ? playNode : kind === 'rx' ? capNode : null;
+    if (!node || !port) { try { port && port.close(); } catch {} return false; }
+    node.port.postMessage({ cmd: 'lane' }, [port]);
+    return true;
+  }
+
+  /** One over begins or ends (main: key-down / carrier dropped). */
+  function over(d) {
+    if (playNode) playNode.port.postMessage({ cmd: d && d.on ? 'over-start' : 'over-end' });
+  }
+
+  /** The transmit level changed (#300): the playing output follows at once. */
+  function setTxGain(g) {
+    const v = (typeof g === 'number' && isFinite(g)) ? Math.max(0, Math.min(2, g)) : null;
+    if (v == null) return;
+    if (cfg) cfg.txGain = v;
+    if (playGain) playGain.gain.value = v;
+  }
+
   function stop() {
     clearInterval(levelTimer); levelTimer = null;
     stopCapture(); stopPlayback();
     status({ stopped: true });
   }
 
-  return { start, playback, tx, stop };
+  return { start, playback, tx, over, stop, lanePort, setTxGain };
 }
 
 const radio = makeSide({
@@ -156,9 +182,16 @@ const cable = makeSide({
   status: (s) => window.bridge.cableStatus(s),
 });
 
+window.addEventListener('message', (e) => {
+  const d = e.data;
+  if (!d || typeof d.potacatModemLanePort !== 'string' || !e.ports || !e.ports[0]) return;
+  radio.lanePort(d.potacatModemLanePort, e.ports[0]);
+});
 window.bridge.onStart((c) => radio.start(c));
 window.bridge.onPlayback((c) => radio.playback(c));
 window.bridge.onTx((d) => radio.tx(d));
+window.bridge.onOver((d) => radio.over(d));
+window.bridge.onTxGain((g) => radio.setTxGain(g));
 window.bridge.onStop(() => { radio.stop(); cable.stop(); });
 window.bridge.onStopRadio(() => radio.stop());
 window.bridge.onCableStart((c) => cable.start({ ...(c || {}), playback: true }));
