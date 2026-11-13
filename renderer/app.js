@@ -28174,9 +28174,9 @@ function updateTitleBar() {
   const ttEl = document.querySelector('.titlebar-title');
   if (!ttEl) return;
   if (appMode === 'activator') {
-    ttEl.textContent = `POTACAT - Activator Mode${v ? ` - v${v}` : ''}`;
+    ttEl.textContent = `POTACAT | W5LEE - Activator Mode${v ? ` - v${v}` : ''}`;
   } else {
-    ttEl.textContent = `POTACAT - Hunter Mode${v ? ` - v${v}` : ''}`;
+    ttEl.textContent = `POTACAT | W5LEE - Hunter Mode${v ? ` - v${v}` : ''}`;
   }
 }
 
