@@ -42,6 +42,7 @@ contextBridge.exposeInMainWorld('api', {
   // known, minPower, maxPower, powerStep, powerDecimals, powerChoices}.
   // Pushed on every rig-state change and once on load. Sets go back through
   // rigControl({action:'set-tx-power', value}).
+  onTciRxPeak: (cb) => ipcRenderer.on('jtcat-tci-rx-peak', (_e, level) => cb(level)),
   onJtcatRigPower: (cb) => ipcRenderer.on('jtcat-rig-power', (_e, p) => cb(p)),
   jtcatWsprBeacon: (opts) => ipcRenderer.send('jtcat-wspr-beacon', opts),
   jtcatWsprHop: (opts) => ipcRenderer.send('jtcat-wspr-hop', opts),

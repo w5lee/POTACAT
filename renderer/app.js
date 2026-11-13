@@ -1513,6 +1513,11 @@ function setRigRxLevelField(v) {
   if (rigRxLevelVal) rigRxLevelVal.textContent = fmtRxLevelDb(n);
 }
 // Full power (W), rig.fullPowerW (lib/rig-full-power.js): blank = the model's.
+const rigLogPowerOverride = document.getElementById('set-rig-log-power-override');
+function readRigLogPowerOverride() {
+  const watts = rigLogPowerOverride.valueAsNumber;
+  return Number.isFinite(watts) && watts > 0 ? watts : null;
+}
 function readRigFullPowerField() {
   const el = document.getElementById('set-rig-full-power');
   const v = el ? parseFloat(el.value) : NaN;
@@ -3668,6 +3673,7 @@ async function openRigEditor(mode, rigId) {
       await populateRigAudioDevices(rig.remoteAudioInput, rig.remoteAudioOutput);
       setRigRxLevelField(rig.rxLevelDb);
       setRigFullPowerField(rig.fullPowerW);
+      rigLogPowerOverride.value = rig.logPowerOverrideW ?? '';
       // Restore per-rig CW key port
       if (setCwKeyPort && rig.cwKeyPort) setCwKeyPort.value = rig.cwKeyPort;
       // Restore per-rig CW keying line (DTR/RTS override; default 'auto')
@@ -3705,6 +3711,7 @@ async function openRigEditor(mode, rigId) {
     if (setCwKeyLine) setCwKeyLine.value = 'auto';
     if (setRadioNr) setRadioNr.value = '1';
     setRigFullPowerField(null);
+    rigLogPowerOverride.value = '';
     const fh = document.getElementById('set-flex-api-host');
     if (fh) fh.value = '';
     setRadioType('flex');
@@ -3870,6 +3877,7 @@ async function saveRigEditor() {
       rig.remoteAudioOutput = rigAudioOut;
       rig.rxLevelDb = rigRxLevelDb;
       rig.fullPowerW = readRigFullPowerField();
+      rig.logPowerOverrideW = readRigLogPowerOverride();
       rig.audioSource = rigAudioSource;
       rig.cwKeyPort = rigCwKeyPortVal;
       rig.cwKeyLine = rigCwKeyLineVal;
@@ -3899,6 +3907,7 @@ async function saveRigEditor() {
       remoteAudioOutput: rigAudioOut,
       rxLevelDb: rigRxLevelDb,
       fullPowerW: readRigFullPowerField(),
+      logPowerOverrideW: readRigLogPowerOverride(),
       audioSource: rigAudioSource,
       cwKeyPort: rigCwKeyPortVal,
       cwKeyLine: rigCwKeyLineVal,
@@ -15810,7 +15819,8 @@ function openLogPopup(spot) {
 
   // Pre-fill power: prefer the live CAT reading (matches the TX Power slider),
   // fall back to the user's last-entered value, then the settings default.
-  logPower.value = radioPower > 0 ? radioPower : (lastLogPower > 0 ? lastLogPower : (defaultPower || 100));
+  logPower.value = rigCurrentCaps.powerUnit === '%' ? ''
+    : radioPower > 0 ? radioPower : (lastLogPower > 0 ? lastLogPower : (defaultPower || 100));
 
   // Pre-fill RST based on mode
   const isCwDigi = CW_DIGI_MODES_SET.has(mode);
@@ -24938,8 +24948,9 @@ function formatFilterWidth(hz) {
 function rigFormatPower(watts) {
   const decimals = Math.max(0, parseInt(rigCurrentCaps.powerDecimals || 0, 10));
   const numeric = Number(watts);
-  if (!Number.isFinite(numeric)) return watts + 'W';
-  return numeric.toFixed(decimals) + 'W';
+  const unit = rigCurrentCaps.powerUnit === '%' ? '%' : 'W';
+  if (!Number.isFinite(numeric)) return watts + unit;
+  return numeric.toFixed(decimals) + unit;
 }
 
 function rigUsesPowerSelect() {
@@ -27837,6 +27848,10 @@ function resumeActivation(activation) {
       timeOn: c.timeOn || '',
       rstSent: c.rstSent || '',
       rstRcvd: c.rstRcvd || '',
+      txPower: c.txPower || '',
+      myRig: c.myRig || '',
+      myGridsquare: c.myGridsquare || '',
+      state: c.state || '',
       stationCallsign: myCallsign || '',
       operator: myCallsign || '',
       // Preserve the P2P side so re-export keeps SIG/SIG_INFO
@@ -28441,6 +28456,9 @@ function buildActivationAdifQsos(act) {
     timeOn: c.timeOn || '',
     rstSent: c.rstSent || '',
     rstRcvd: c.rstRcvd || '',
+    txPower: c.txPower || '',
+    myRig: c.myRig || '',
+    state: c.state || '',
     mySig: r.sig || 'POTA',
     mySigInfo: r.ref,
     stationCallsign: myCallsign || '',

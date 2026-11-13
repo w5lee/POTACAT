@@ -108,9 +108,12 @@ test('waits for ready, subscribes without keying, and delivers RX1 audio', { tim
   const txStates = [];
   const dspChanges = [];
   let receive;
+  let receivePeak;
+  const peaks = [];
   const audio = new Promise((resolve) => { receive = resolve; });
   const client = connectTciJtcatRx(server.address().port, {
     onAudio: receive,
+    onRxPeak(level) { peaks.push(level); receivePeak?.(level); },
     onDial: (hz) => dial.push(hz),
     onMode: (mode) => modes.push(mode),
     onSmeter: (dbm) => meters.push(dbm),
@@ -134,8 +137,9 @@ test('waits for ready, subscribes without keying, and delivers RX1 audio', { tim
       'audio_samplerate:12000;audio_stream_channels:1;audio_stream_sample_type:float32;audio_start:0;trx:0;');
     // Use the next audio frame as a barrier after the text updates.
     peer.send('trx:0,true;modulation:0,DIGU;modulation:1,LSB;rx_smeter:0,2,-73.5;rx_smeter:0,4,-55;rx_smeter:1,0,-52;tx_power:6.8;tx_swr:1.2;tx_alc:3;tx_power:-1;tx_swr:0;tx_alc:105;');
-    peer.send(rxFrame([0.25, -0.25]));
-    assert.deepEqual([...(await audio)], [0.25, -0.25]);
+    peer.send(rxFrame(Array(3000).fill(1)));
+    assert.equal((await audio).length, 3000);
+    assert.deepEqual(peaks, []);
     assert.deepEqual(dial, [14074000]);
     assert.deepEqual(modes, ['DIGU']);
     assert.deepEqual(meters, [-73.5]);
@@ -147,6 +151,13 @@ test('waits for ready, subscribes without keying, and delivers RX1 audio', { tim
     while (dial.length < 2) await new Promise((resolve) => setImmediate(resolve));
     assert.equal(client.transmitting, false);
     assert.deepEqual(txStates, [true, false]);
+    const cleanPeak = new Promise(resolve => { receivePeak = resolve; });
+    peer.send(rxFrame(Array(1500).fill(0.25)));
+    peer.send(rxFrame(Array(1500).fill(-0.5)));
+    assert.deepEqual(await cleanPeak, { peakDb: 20 * Math.log10(0.5), nearClip: false });
+    const fullScale = new Promise(resolve => { receivePeak = resolve; });
+    peer.send(rxFrame(Array(3000).fill(-1)));
+    assert.deepEqual(await fullScale, { peakDb: 0, nearClip: true });
     assert.match(await client.tune(14074000, 'INVALID', true), /unsupported/i);
     const tune = once(peer, 'message');
     assert.equal(await client.tune(14074000, 'FT8', true), '');
@@ -366,7 +377,7 @@ for (const scenario of [
     let report;
     const volume = new Promise(resolve => { report = resolve; });
     const client = connectTciJtcatRx(server.address().port, {
-      server: scenario.server, onRxVolume: report, onAudio() {}, onDial() {}, onMode() {}, onSmeter() {}, onTxMeter() {}, log() {},
+      server: scenario.server, onRxVolume: value => report(value), onAudio() {}, onDial() {}, onMode() {}, onSmeter() {}, onTxMeter() {}, log() {},
     });
     try {
       const [peer] = await connection;
@@ -381,6 +392,17 @@ for (const scenario of [
       const command = once(peer, 'message');
       assert.equal(client.setRxVolume(0.5), true);
       assert.equal((await command)[0].toString(), `rx_volume:0,0,${scenario.halfVolumeDb};rx_volume:0,0;`);
+      if (scenario.server === 'zeus') {
+        const full = once(peer, 'message');
+        assert.equal(client.setRxVolume(1), true);
+        assert.equal((await full)[0].toString(), 'rx_volume:0,0,20.00;rx_volume:0,0;');
+        const half = once(peer, 'message');
+        assert.equal(client.setRxVolume(0.5), true);
+        assert.equal((await half)[0].toString(), 'rx_volume:0,0,13.98;rx_volume:0,0;');
+        const confirmed = new Promise(resolve => { report = resolve; });
+        peer.send('rx_volume:0,0,14;');
+        assert.equal(await confirmed, Math.pow(10, (13.98 - 20) / 20));
+      }
     } finally {
       client.close();
       for (const peer of server.clients) peer.terminate();
@@ -494,15 +516,19 @@ for (const scenario of [
   });
 }
 
-test('Zeus TCI cycles supported NR and NB modes', { timeout: 3000 }, async () => {
+test('Zeus TCI cycles NR and NB and reads back RF gain and drive', { timeout: 3000 }, async () => {
   const server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
   await once(server, 'listening');
   const connection = once(server, 'connection');
   let ready;
   const linked = new Promise(resolve => { ready = resolve; });
   let reportNb;
+  const levels = [];
+  const driveWrites = [];
   const radio = connectTciJtcatRx(server.address().port, {
     server: 'zeus', onNoiseBlanker: enabled => reportNb?.(enabled),
+    onAttenuation: percent => levels.push(percent),
+    onDrive(percent, written) { levels.push(percent); driveWrites.push(written); },
     onLink(connected) { if (connected) ready(); },
     onAudio() {}, onDial() {}, onMode() {}, onSmeter() {}, onTxMeter() {}, log() {},
   });
@@ -511,7 +537,7 @@ test('Zeus TCI cycles supported NR and NB modes', { timeout: 3000 }, async () =>
     const subscribed = new Promise(resolve => peer.on('message', data => {
       if (data.toString() === 'rx_nb_enable:0;rx_nb2_enable:0;') resolve();
     }));
-    peer.send('trx:0,false;ready;');
+    peer.send('trx:0,false;drive:0,50;ready;');
     await linked;
     await subscribed;
     const nr = once(peer, 'message');
@@ -538,6 +564,18 @@ test('Zeus TCI cycles supported NR and NB modes', { timeout: 3000 }, async () =>
       assert.equal(radio.noiseBlankerLevel, level);
       assert.deepEqual(notices, [level]);
     }
+    const attenuation = once(peer, 'message');
+    assert.equal(radio.setRfGain(50), true);
+    assert.equal((await attenuation)[0].toString(), 'attenuator:0,16;attenuator:0;');
+    const drive = once(peer, 'message');
+    assert.equal(radio.setDrive(75), true);
+    assert.equal((await drive)[0].toString(), 'drive:0,75;drive:0;');
+    assert.equal(radio.setDrive(101), false);
+    const readback = new Promise(resolve => { reportNb = resolve; });
+    peer.send('attenuator:0,31;attenuator:0,23;attenuator:0,16;attenuator:0,8;attenuator:0,0;drive:0,50;rx_nb2_enable:0,false;');
+    await readback;
+    assert.deepEqual(levels, [50, 0, 25, 50, 75, 100, 50]);
+    assert.deepEqual(driveWrites, [false, true]);
   } finally {
     radio.close();
     for (const peer of server.clients) peer.terminate();
@@ -569,6 +607,57 @@ test('local Zeus engine cycles through all five NR algorithms and off', { timeou
     }
     assert.deepEqual(changes, ['Anr', 'Emnr', 'Rnnr', 'Sbnr', 'Nnr', 'Off']);
   } finally {
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test('Thetis RF gain uses only the enabled RX1 step attenuator and shares drive control', { timeout: 3000 }, async () => {
+  const server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
+  await once(server, 'listening');
+  const connection = once(server, 'connection');
+  let reportGain;
+  let reportDrive;
+  const radio = connectTciJtcatRx(server.address().port, {
+    server: 'thetis',
+    onAttenuation: value => reportGain?.(value),
+    onDrive: value => reportDrive?.(value),
+    onAudio() {}, onDial() {}, onMode() {}, onSmeter() {}, onTxMeter() {}, log() {},
+  });
+  try {
+    const [peer] = await connection;
+    const queried = new Promise(resolve => peer.on('message', data => {
+      if (data.toString() === 'rx_step_att_ex:0;') resolve();
+    }));
+    peer.send('device:HERMESLITE;trx:0,false;ready;');
+    await queried;
+    assert.equal(radio.setRfGain(25), false);
+
+    const initial = new Promise(resolve => { reportGain = resolve; });
+    peer.send('rx_step_att_ex:0,0;');
+    assert.equal(await initial, null);
+    const enabled = new Promise(resolve => { reportGain = resolve; });
+    peer.send('rx_step_att_enabled_ex:0,true;');
+    assert.equal(await enabled, 100);
+
+    const gain = once(peer, 'message');
+    assert.equal(radio.setRfGain(25), true);
+    assert.equal((await gain)[0].toString(), 'rx_step_att_ex:0,23;rx_step_att_ex:0;');
+    const confirmed = new Promise(resolve => { reportGain = resolve; });
+    peer.send('rx_step_att_ex:0,23;');
+    assert.equal(await confirmed, 25);
+
+    const drive = once(peer, 'message');
+    assert.equal(radio.setDrive(50), true);
+    assert.equal((await drive)[0].toString(), 'drive:0,45;drive:0;');
+    const maximum = once(peer, 'message');
+    assert.equal(radio.setDrive(100), true);
+    assert.equal((await maximum)[0].toString(), 'drive:0,90;drive:0;');
+    const confirmedDrive = new Promise(resolve => { reportDrive = resolve; });
+    peer.send('drive:0,90;');
+    assert.equal(await confirmedDrive, 100);
+  } finally {
+    radio.close();
+    for (const peer of server.clients) peer.terminate();
     await new Promise(resolve => server.close(resolve));
   }
 });

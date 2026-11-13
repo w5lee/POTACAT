@@ -208,6 +208,17 @@ console.log('\nMY_SIG carries the activation program');
   check(!wwbota.includes('MY_WWBOTA_REF'), 'WWBOTA has no dedicated MY_ ref field (known gap)');
 }
 
+console.log('\nActivation rig and power survive ADIF');
+{
+  const file = tempAdif([
+    { callsign: 'W1AW', frequency: '14074', mode: 'FT8', qsoDate: TODAY, mySig: 'POTA', mySigInfo: 'US-0001',
+      myRig: 'Hermes-Lite (Zeus)', txPower: '5.9' },
+  ]);
+  const [record] = parseAllRawQsos(file);
+  check(record.MY_RIG === 'Hermes-Lite (Zeus)', 'activation preserves the logging rig');
+  check(record.TX_PWR === '5.9', 'activation preserves measured watts');
+}
+
 console.log('\nMY_SIG round-trips through the log');
 {
   // This is the exact path that closes the resume bug: getPastActivations
