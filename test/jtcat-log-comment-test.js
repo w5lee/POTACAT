@@ -17,11 +17,12 @@ function test(name, fn) {
 const main = read('main.js'), app = read('renderer/app.js'), html = read('renderer/index.html');
 console.log('JTCAT log comment setting');
 test('main: the standard comment follows the setting, default on', () => {
-  assert.ok(main.includes("comment: settings.jtcatLogComment !== false ? 'JTCAT ' + mode : '',"));
+  assert.ok(main.includes("const logSource = opts?.fromWindow ? 'JTCAT' : 'ECHOCAT';"));
+  assert.ok(main.includes("comment: settings.jtcatLogComment !== false ? `${logSource} ${mode}` : '',"));
   assert.ok(!main.includes("comment: 'JTCAT ' + mode,"));
 });
 test('main: the Field Day comment follows it too', () => {
-  assert.ok(/if \(settings\.jtcatLogComment !== false\) qsoData\.comment = `JTCAT FD /.test(main));
+  assert.ok(/if \(settings\.jtcatLogComment !== false\) qsoData\.comment = `\$\{logSource\} FD /.test(main));
 });
 test('Settings > Logging has the checkbox, checked by default', () => {
   assert.ok(/<input type="checkbox" id="set-jtcat-log-comment" checked>/.test(html));
