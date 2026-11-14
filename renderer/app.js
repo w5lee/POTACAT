@@ -1319,6 +1319,7 @@ const setLotwPassword = document.getElementById('set-lotw-password');
 const setLotwUploadReminder = document.getElementById('set-lotw-upload-reminder');
 const lotwUploadBtn = document.getElementById('lotw-upload-btn');
 const lotwUploadResult = document.getElementById('lotw-upload-result');
+const setLotwAutoDownload = document.getElementById('set-lotw-auto-download');
 const setLotwLogin = document.getElementById('set-lotw-login');
 const setLotwTqslPath = document.getElementById('set-lotw-tqsl-path');
 const setLotwWebPassword = document.getElementById('set-lotw-web-password');
@@ -18367,6 +18368,7 @@ async function openSettingsDialog(tab) {
   setLotwUploadReminder.checked = s.lotwUploadReminder === true;
   setLotwPassword.value = s.lotwCertPassword || '';
   setLotwTqslPath.value = s.tqslPath || '';
+  setLotwAutoDownload.checked = s.lotwAutoDownload === true;
   setLotwLogin.value = s.lotwLogin || '';
   setLotwWebPassword.value = s.lotwPassword || '';
   lotwConfig.classList.toggle('hidden', !s.lotwEnable);
@@ -19247,6 +19249,7 @@ settingsSave.addEventListener('click', async () => {
     lotwStationLocation: setLotwLocation.value || '',
     lotwCertPassword: setLotwPassword.value || '',
     tqslPath: setLotwTqslPath.value.trim(),
+    lotwAutoDownload: setLotwAutoDownload.checked,
     lotwLogin: setLotwLogin.value.trim(),
     lotwPassword: setLotwWebPassword.value || '',
     clublogEnable: setClublogEnable.checked,
