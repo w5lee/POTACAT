@@ -116,7 +116,8 @@ check('batch ADIF round-trips the filled fields', () => {
 check('main signs each activation with its own args and never the home location', () => {
   const main = readSrc(path.join(__dirname, '..', 'main.js'));
   const h = main.slice(main.indexOf("ipcMain.handle('lotw-upload'"), main.indexOf('function runLotwBatch('));
-  assert.ok(h.includes('splitForLotw(allQsos'), 'handler splits the log');
+  assert.ok(h.includes('splitLotwLog(allQsos)'), 'handler splits the log');
+  assert.ok(main.includes('return splitForLotw(qsos, {'), 'upload and reminder share the location rules');
   assert.ok(h.includes('buildActivationTqslArgs({ call: b.call'), 'activations use the update-mode args');
   assert.ok(/if \(b\.skip\) continue;/.test(h), 'held-back batches are not run');
   assert.ok(!main.includes("fs.copyFileSync(logPath, snap)"), 'no whole-log snapshot upload left');

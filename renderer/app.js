@@ -1316,6 +1316,7 @@ const setLotwEnable = document.getElementById('set-lotw-enable');
 const lotwConfig = document.getElementById('lotw-config');
 const setLotwLocation = document.getElementById('set-lotw-location');
 const setLotwPassword = document.getElementById('set-lotw-password');
+const setLotwUploadReminder = document.getElementById('set-lotw-upload-reminder');
 const lotwUploadBtn = document.getElementById('lotw-upload-btn');
 const lotwUploadResult = document.getElementById('lotw-upload-result');
 const setLotwLogin = document.getElementById('set-lotw-login');
@@ -18363,6 +18364,7 @@ async function openSettingsDialog(tab) {
   setSotaPassword.value = s.sotaPassword || '';
   sotaUploadConfig.classList.toggle('hidden', !s.sotaUpload);
   setLotwEnable.checked = s.lotwEnable === true;
+  setLotwUploadReminder.checked = s.lotwUploadReminder === true;
   setLotwPassword.value = s.lotwCertPassword || '';
   setLotwTqslPath.value = s.tqslPath || '';
   setLotwLogin.value = s.lotwLogin || '';
@@ -19241,6 +19243,7 @@ settingsSave.addEventListener('click', async () => {
     sotaUsername: sotaUsernameVal,
     sotaPassword: sotaPasswordVal,
     lotwEnable: setLotwEnable.checked,
+    lotwUploadReminder: setLotwUploadReminder.checked,
     lotwStationLocation: setLotwLocation.value || '',
     lotwCertPassword: setLotwPassword.value || '',
     tqslPath: setLotwTqslPath.value.trim(),
