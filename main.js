@@ -46296,7 +46296,7 @@ function cloudShackNotice(text, kind) {
     return r;
   }
 
-  const LOTW_REMINDER_INTERVAL = 24 * 60 * 60 * 1000;
+  const LOTW_DAILY_INTERVAL = 24 * 60 * 60 * 1000;
   let lotwReminderOpen = false;
   async function checkLotwUploadReminder() {
     if (!settings.lotwEnable || !settings.lotwUploadReminder || !settings.lotwStationLocation
@@ -46304,7 +46304,7 @@ function cloudShackNotice(text, kind) {
         || !win || win.isDestroyed() || !win.isFocused()) return;
     const now = Date.now();
     if (now - Math.max(settings.lastLotwReminderAt || 0, settings.lastLotwUploadAt || 0)
-        < LOTW_REMINDER_INTERVAL) return;
+        < LOTW_DAILY_INTERVAL) return;
     const { findTqsl } = require('./lib/tqsl');
     if (!findTqsl(settings.tqslPath)) return;
     const logPath = settings.adifLogPath || path.join(app.getPath('userData'), 'potacat_qso_log.adi');
@@ -46444,13 +46444,26 @@ function cloudShackNotice(text, kind) {
 
   // ── LoTW Phase 3: confirmation download (lotwreport.adi) ────────────
   // Different auth than upload: the LoTW WEBSITE login, not the TQSL cert.
+  let lotwDownloadInProgress = false;
   async function lotwDownloadConfirmations(opts) {
+    if (lotwDownloadInProgress) return { ok: false, message: 'A LoTW confirmation download is already in progress.' };
+    lotwDownloadInProgress = true;
+    try {
+      return await downloadLotwReport(opts);
+    } finally {
+      lotwDownloadInProgress = false;
+    }
+  }
+
+  async function downloadLotwReport(opts) {
     const { buildLotwReportQuery, parseLotwAdif, looksLikeLotwAuthFailure, stampLotwConfirmations } = require('./lib/lotw-report');
     const { lotwKey } = require('./lib/lotw-flags');
     const login = (opts && opts.login) || settings.lotwLogin;
     const password = (opts && opts.password) || settings.lotwPassword;
     if (!login || !password) return { ok: false, message: 'Enter your LoTW username and password first (your lotw.arrl.org website login).' };
-    const logPath = settings.adifLogPath || path.join(app.getPath('userData'), 'potacat_qso_log.adi');
+    const profile = settings.activeProfile;
+    const configuredLog = settings.adifLogPath;
+    const logPath = configuredLog || path.join(app.getPath('userData'), 'potacat_qso_log.adi');
     if (!fs.existsSync(logPath)) return { ok: false, message: 'No QSO log to match confirmations against yet.' };
     // Incremental after the first pull, with a 7-day overlap so a QSL that
     // lands between runs can never slip through the crack.
@@ -46475,6 +46488,9 @@ function cloudShackNotice(text, kind) {
       req.on('timeout', () => { req.destroy(); resolve({ status: 0, body: 'timeout' }); });
       req.on('error', (e) => resolve({ status: 0, body: e.message }));
     });
+    if (settings.activeProfile !== profile || settings.adifLogPath !== configuredLog) {
+      return { ok: false, message: 'The active profile or log changed during the LoTW download. Please try again.' };
+    }
     if (res.status !== 200) {
       sendCatLog(`[LoTW] Confirmation download failed (HTTP ${res.status})`);
       return { ok: false, message: res.status === 0 ? `Could not reach LoTW: ${res.body}.` : `LoTW answered HTTP ${res.status} — try again later.` };
@@ -46508,6 +46524,23 @@ function cloudShackNotice(text, kind) {
     return { ok: true, message: `${stats.confirmed} new confirmation${stats.confirmed === 1 ? '' : 's'} — ${totalConfirmed} QSOs confirmed on LoTW.` + (stats.detailed ? ` ${stats.detailed} QSOs gained the other station's state or grid.` : '') + (stats.unmatched.length ? ` ${stats.unmatched.length} had no matching QSO here (see log).` : '') };
   }
   ipcMain.handle('lotw-download-confirmations', (_e, opts) => lotwDownloadConfirmations(opts));
+
+  const lotwAutoDownloadAttempts = new Map();
+  async function checkLotwAutoDownload() {
+    if (!settings.lotwEnable || !settings.lotwAutoDownload || isRemoteMode()
+        || !settings.lotwLogin || !settings.lotwPassword || lotwDownloadInProgress) return;
+    const now = Date.now();
+    if (now - (settings.lotwLastQslDownload || 0) < LOTW_DAILY_INTERVAL) return;
+    const profile = settings.activeProfile || '';
+    if (now - (lotwAutoDownloadAttempts.get(profile) || 0) < 60 * 60 * 1000) return;
+    lotwAutoDownloadAttempts.set(profile, now);
+    const result = await lotwDownloadConfirmations();
+    if (!result.ok) sendCatLog(`[LoTW] Automatic confirmation download: ${result.message}`);
+  }
+
+  setInterval(() => {
+    checkLotwAutoDownload().catch(() => sendCatLog('[LoTW] Could not update the log with confirmations.'));
+  }, 60 * 1000).unref();
 
   // ── Club Log bulk upload (putlogs.php). The per-QSO realtime push
   // lives in the QSO fan-out next to the SOTA uploader. ──────────────
