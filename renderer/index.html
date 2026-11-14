@@ -240,6 +240,10 @@
     </div>
     <div class="status-bar">
       <span id="utc-clock" class="utc-clock"></span>
+      <!-- WSJT-X Mode flag (#547, lib/wsjtx-mode-notice.js): first among the chips,
+           amber, shown whenever WSJT-X Mode is on. Click = the CAT menu with the
+           WSJT-X Mode panel at the top. -->
+      <span id="wsjtx-status" class="status wsjtx-mode-chip hidden" role="button" tabindex="0" title="WSJT-X Mode is on: WSJT-X has the radio. Click for details.">WSJT-X Mode</span>
       <span id="cat-status" class="status disconnected">CAT</span>
       <!-- Active remote shack indicator (v1.9 desktop-to-desktop).
            Hidden when activeTargetId is null; shown when this desktop
@@ -260,7 +264,6 @@
            do use split legitimately). KQ4MHD report 2026-04-30. -->
       <span id="split-indicator" class="status hidden" style="background:#f0a500;color:#1a1a2e;font-weight:bold;cursor:pointer;" title="Split mode is ON — RX and TX are on different VFOs. Click to disable.">SPLIT</span>
       <span id="jtcat-tx-indicator" class="status hidden" style="background:var(--accent-red, #e94560);color:#fff;font-weight:bold;animation:tx-blink 1s ease-in-out infinite;">JTCAT TX</span>
-      <span id="wsjtx-status" class="status disconnected hidden">WSJT-X</span>
       <span id="cw-keyer-status" class="status hidden" style="background:#b8860b;color:#fff;cursor:pointer;">CW</span>
       <div id="cw-popover" class="cw-popover hidden">
         <div class="cw-popover-row">
@@ -480,6 +483,18 @@
   </header>
 
   <div id="cat-popover" class="cat-popover hidden">
+    <!-- WSJT-X Mode panel (#547): shown at the top while the mode is on. The
+         words come from lib/wsjtx-mode-notice.js. Turn off = unticking the box below. -->
+    <div id="cat-popover-wsjtx-panel" class="wsjtx-mode-panel hidden" role="status">
+      <div class="wsjtx-mode-title" id="wsjtx-panel-title">WSJT-X Mode is on</div>
+      <div class="wsjtx-mode-line" id="wsjtx-panel-line"></div>
+      <div class="wsjtx-mode-state" id="wsjtx-panel-state"></div>
+      <div class="wsjtx-mode-line" id="wsjtx-panel-hint"></div>
+      <div class="wsjtx-mode-buttons">
+        <button type="button" id="wsjtx-panel-off" class="wsjtx-mode-btn">Turn off WSJT-X Mode</button>
+        <button type="button" id="wsjtx-panel-keep" class="wsjtx-mode-btn">Keep it on</button>
+      </div>
+    </div>
     <div class="cat-popover-rigs" id="cat-popover-rigs"></div>
     <div class="cat-popover-divider"></div>
     <label class="cat-popover-wsjtx">
@@ -489,12 +504,6 @@
       <label>UDP Port:
         <input type="number" id="cat-popover-wsjtx-port-input" min="1024" max="65535" style="width:70px;">
       </label>
-    </div>
-    <div id="cat-popover-wsjtx-warning" class="cat-popover-wsjtx-warning hidden">
-      WSJT-X Mode is on but POTACAT isn't receiving heartbeats on
-      port <span id="cat-popover-wsjtx-warn-port">2237</span>. If
-      WSJT-X isn't running, uncheck the box above to take direct CAT
-      control.
     </div>
   </div>
 
@@ -620,7 +629,7 @@
       <span id="activator-op-name" class="activator-op-name"></span>
       <input type="text" id="activator-state" placeholder="State" maxlength="6" spellcheck="false" autocomplete="off" title="State (auto-filled from QRZ, editable)" style="text-transform:uppercase;">
       <div class="activator-hunter-park-wrap">
-        <input type="text" id="activator-hunter-park" placeholder="P2P ref" maxlength="12" spellcheck="false" autocomplete="off" title="Hunter's park ref (park-to-park)">
+        <input type="text" id="activator-hunter-park" placeholder="P2P ref" maxlength="80" spellcheck="false" autocomplete="off" title="Hunter's park ref (park-to-park)">
         <span id="activator-hunter-park-extra" class="activator-park-extra hidden"></span>
         <div id="activator-hunter-dropdown" class="activator-dropdown hidden"></div>
       </div>
@@ -773,7 +782,7 @@
             <option value="llota">LLOTA</option>
             <option value="wwbota">WWBOTA</option>
           </select>
-          <input type="text" id="bl-ref" class="bl-field bl-ref hidden" placeholder="Ref" maxlength="60" spellcheck="false" autocomplete="off" style="text-transform:uppercase;">
+          <input type="text" id="bl-ref" class="bl-field bl-ref hidden" placeholder="Ref" maxlength="80" spellcheck="false" autocomplete="off" style="text-transform:uppercase;">
           <input type="text" id="bl-callsign" class="bl-field bl-callsign" placeholder="Callsign" maxlength="20" spellcheck="false" autocomplete="off" autocapitalize="characters">
           <span id="bl-dupe" class="bl-dupe hidden" title="">DUPE</span>
           <!-- Two-part readout: QRZ name (ellipsized when long) + right-justified
@@ -1033,7 +1042,7 @@
           </select>
         </label>
         <span class="dxcc-progress">
-          <span id="dxcc-count">0 / 100</span>
+          <span id="dxcc-count">0 / 100 worked</span>
           <span id="dxcc-award-label"></span>
         </span>
         <span id="dxcc-challenge" class="dxcc-challenge hidden"></span>
@@ -2550,7 +2559,7 @@
           <span class="help-text" style="display:inline;margin-left:4px;">(0 = no limit)</span>
         </div>
       </div>
-      <label class="checkbox-label"><input type="checkbox" id="set-enable-wsjtx"> WSJT-X Integration</label>
+      <label class="checkbox-label"><input type="checkbox" id="set-enable-wsjtx"> WSJT-X Mode</label>
       <div id="wsjtx-config" class="radio-sub hidden">
         <span class="help-text" style="font-size:12px;">Connect to WSJT-X via UDP. POTA activators are highlighted in the decode window and decodes appear in POTACAT.</span>
         <label>UDP Port:
@@ -2911,8 +2920,9 @@
           <span class="help-text" style="display:block;margin-top:4px;">Import QSOs from N3FJP, HRD Logbook, HAMRS, Log4OM, or any other ADIF (.adi) or SQLite (.sqlite) export. Imported QSOs are merged into your POTACAT log; any park references they carry (POTA_REF or SIG=POTA + SIG_INFO) populate the <strong>worked-parks</strong> filter — that's what drives "Hide worked parks" / "Show NEW parks at top" in the spots table.</span>
         </div>
         <label style="margin-top:10px;">Default TX Power (W):
-          <input type="number" id="set-default-power" min="1" max="5000" value="100">
+          <input type="number" id="set-default-power" min="1" max="5000" placeholder="none">
         </label>
+        <span class="help-text" style="margin-left:12px;margin-bottom:6px;display:block;">Logged only when the radio's power cannot be read and POTACAT has not set it. Blank: the contact is logged with no power.</span>
         <label class="checkbox-label"><input type="checkbox" id="set-n1mm-rst"> N1MM-style RST logging</label>
         <span class="help-text" style="margin-left:12px;margin-bottom:6px;display:block;">On: one box per digit of each report. Off: one field per report; a full report moves the cursor to RST Rcvd by itself, and a Tab pressed straight after stays there.</span>
         <label class="checkbox-label"><input type="checkbox" id="set-log-comment-tags" checked> Auto park/club tags in comment</label>
@@ -3020,9 +3030,10 @@
               </label>
               <div style="margin-top:6px;">
                 <button type="button" id="lotw-download-btn">Download confirmations</button>
+                <button type="button" id="lotw-download-all-btn" style="margin-left:6px;">Download all confirmations again</button>
                 <span id="lotw-download-result" class="help-text" style="margin-left:8px;"></span>
               </div>
-              <span class="help-text" style="display:block;margin-top:4px;">Confirmed QSOs get the L&#10003; mark in the QSO log window and count as confirmed in the DXCC Tracker. The first download pulls your full history; later ones fetch only new confirmations.</span>
+              <span class="help-text" style="display:block;margin-top:4px;">Confirmed QSOs get the L&#10003; mark in the QSO log window. The DXCC Tracker counts entities worked from an ADIF log, confirmed or not. The first download pulls your full history; later ones fetch only new confirmations. Imported an older log since? Use Download all confirmations again.</span>
             </div>
           </div>
         </div>
@@ -3492,6 +3503,10 @@
         </div>
         <label class="checkbox-label" style="margin-top:6px;"><input type="checkbox" id="set-winlink-prediction" checked> Rank gateways by predicted propagation</label>
         <span class="help-text" style="display:block;">The gateway list is ordered by the path VOACAP expects to be open right now, not by distance. Your grid square and each gateway's are sent to POTACAT's VOACAP service at api.potacat.com; a VOACAP you installed yourself is used instead. Off = nearest first, nothing sent.</span>
+        <label style="margin-top:6px;display:block;">Empty the Deleted mail folder after
+          <select id="set-winlink-deleted-days"><option value="7">7 days</option><option value="30" selected>30 days</option><option value="90">90 days</option><option value="0">Never</option></select>
+        </label>
+        <span class="help-text" style="display:block;">Deleting a Winlink message moves it to the Deleted folder, where you can restore it. After this many days it is removed for good.</span>
         <label class="checkbox-label" style="margin-top:6px;"><input type="checkbox" id="set-winlink-auto-retry" checked> Try again once by itself when a link drops</label>
         <span class="help-text" style="display:block;">If a radio link to a gateway connects and then drops before the mail is exchanged, POTACAT waits 20 seconds, checks that the channel is clear and nothing is transmitting, and calls the same gateway on the same frequency once more. You can cancel it during the wait. Never after you press Abort, and never after "no answer".</span>
         <label style="margin-top:6px;">End a radio session after
@@ -4949,6 +4964,7 @@
       <button type="button" id="ss-close" class="log-dialog-x" title="Close">&times;</button>
     </div>
     <div id="ss-progress" class="ss-progress"></div>
+    <div id="ss-notice" class="ss-notice hidden" role="status"></div>
     <div id="ss-message" class="ss-message hidden"></div>
     <div id="ss-steps" class="ss-steps"></div>
     <div id="ss-share" class="ss-share hidden"></div>
@@ -4966,6 +4982,16 @@
     <div class="er-title">Enjoying ECHOCAT?</div>
     <div id="er-text" class="ss-card-text"></div>
     <div id="er-buttons" class="ss-card-buttons"></div>
+  </div>
+  <!-- WSJT-X Mode start notice (#547): 30 s after start, mode on, WSJT-X never
+       heard. Words from lib/wsjtx-mode-notice.js. Keep it on = until next start. -->
+  <div id="wsjtx-mode-card" class="station-setup-card wsjtx-mode-card hidden" role="alert">
+    <div class="wsjtx-mode-title" id="wsjtx-card-title"></div>
+    <div class="ss-card-text" id="wsjtx-card-text"></div>
+    <div class="ss-card-buttons">
+      <button type="button" id="wsjtx-card-off" class="wsjtx-mode-btn primary">Turn off WSJT-X Mode</button>
+      <button type="button" id="wsjtx-card-keep" class="wsjtx-mode-btn">Keep it on</button>
+    </div>
   </div>
   <div id="station-setup-card" class="station-setup-card hidden" role="status">
     <div id="ss-card-text" class="ss-card-text"></div>
@@ -5378,6 +5404,8 @@
 
   <script src="../node_modules/leaflet/dist/leaflet.js"></script>
   <script src="../lib/freq-dots.js"></script>
+  <script src="../lib/pass-wording.js"></script>
+  <script src="../lib/net-reminder-row.js"></script>
   <script src="../lib/rig-family.js"></script>
   <script src="../lib/waterfall-palettes.js"></script>
   <script src="../lib/app-theme.js"></script>
@@ -5395,6 +5423,7 @@
   <script src="../lib/spot-programs.js"></script>
   <script src="../lib/cm108-ptt.js"></script>
   <script src="../lib/remote-features.js"></script>
+  <script src="../lib/wsjtx-mode-notice.js"></script>
   <script src="../lib/cloud-billing-ui.js"></script>
   <script src="../lib/custom-cat-follow.js"></script>
   <script src="../lib/rig-gain-steps.js"></script>
@@ -5403,21 +5432,26 @@
   <script src="../lib/prior-contacts.js"></script>
   <script src="../lib/spot-mute-rules.js"></script>
   <script src="../lib/spot-age.js"></script>
+  <script src="../lib/dxcc-progress.js"></script>
   <script src="../lib/call-filter.js"></script>
   <script src="../lib/dx-rule.js"></script>
   <script src="../lib/audio-device-heal.js"></script>
   <script src="../lib/log-freq.js"></script>
+  <script src="../lib/log-tx-power.js"></script>
   <script src="../lib/release-notes-format.js"></script>
   <script src="../lib/watchlist-groups.js"></script>
   <script src="../lib/activation-program.js"></script>
   <script src="../lib/park-db-check.js"></script>
   <script src="../lib/park-grid.js"></script>
+  <script src="../lib/p2p-park-entry.js"></script>
   <script src="../lib/rst-advance.js"></script>
   <script src="../lib/prop-empty-state.js"></script>
   <script src="../lib/dxpedition-contests.js"></script>
   <script src="../lib/worked-roster.js"></script>
   <script src="../lib/worked-overlay.js"></script>
   <script src="../lib/capture-stall.js"></script>
+  <script src="../lib/winlink-mail-view.js"></script>
+  <script src="../lib/mac-mic-access.js"></script>
   <script src="../lib/jtcat-capture-gate.js"></script>
   <script src="../lib/diagnostic-snapshot.js"></script>
   <script src="was-view.js"></script>

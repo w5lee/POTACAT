@@ -3619,6 +3619,11 @@ dialog {
   color: var(--text-primary);
 }
 .displaced-banner.hidden { display: none; }
+/* Guest Pass notices that are a wait, not an ending (#541): warning, not red. */
+.displaced-banner.pass-good {
+  background: linear-gradient(180deg, color-mix(in srgb, var(--warn) 22%, var(--bg-primary)), var(--bg-primary));
+  border-bottom-color: var(--warn);
+}
 .displaced-banner-msg { flex: 1; line-height: 1.4; }
 .displaced-banner-actions { display: flex; gap: 6px; flex-shrink: 0; }
 .displaced-banner-actions button {
@@ -5391,6 +5396,15 @@ a.settings-echocat-badge-link:hover {
   border-bottom: 1px solid var(--border-primary);
 }
 
+/* `dialog input` makes every input a full-width block; this checkbox is only the
+   on/off state and must leave the row to the net's name (#284). */
+.net-item input[type="checkbox"] {
+  display: inline-block;
+  width: auto;
+  margin: 0;
+  flex: 0 0 auto;
+}
+
 .net-item-info {
   flex: 1;
   min-width: 0;
@@ -6470,6 +6484,16 @@ a.settings-echocat-badge-link:hover {
   padding-right: 28px;
 }
 
+/* #463: the macOS microphone message is read once and acted on: larger text. */
+.log-toast.mac-mic {
+  font-size: 15px;
+  line-height: 1.45;
+  max-width: 460px;
+  /* --warn is the theme's readable amber (dark amber on light themes). */
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
 .log-toast-dismiss {
   position: absolute;
   top: 4px;
@@ -6913,21 +6937,64 @@ a.settings-echocat-badge-link:hover {
   width: auto;
 }
 
-/* Warning shown in the CAT popover when WSJT-X Mode is on but POTACAT
-   isn't receiving WSJT-X heartbeats — the silent-CAT trap N3VD 2026-05-24
-   spent an hour on. The amber matches the visual weight of other "warning,
-   not error" banners. */
-.cat-popover-wsjtx-warning {
-  margin: 4px 8px 8px 8px;
-  padding: 6px 8px;
-  border-left: 3px solid var(--source-sota);
-  background: rgba(240, 165, 0, 0.10);
-  color: #ffd47a;
-  font-size: 11px;
-  line-height: 1.35;
-  border-radius: 3px;
+/* WSJT-X Mode, impossible to miss (#547; lib/wsjtx-mode-notice.js). The
+   chip is the theme's caution amber (--warn / --warn-subtle, which the design
+   system themes point at --ds-warn); the CAT pill goes neutral grey, never
+   green, while WSJT-X has the radio. The panel sits at the top of the CAT
+   menu (the silent-CAT trap N3VD 2026-05-24 spent an hour on). */
+.status.wsjtx-mode-chip {
+  background: var(--warn-subtle);
+  color: var(--warn);
+  border: 1px solid var(--warn);
+  cursor: pointer;
 }
-.cat-popover-wsjtx-warning.hidden { display: none; }
+.status.wsjtx-mode-chip:focus-visible { outline: 2px solid var(--warn); outline-offset: 1px; }
+.status.wsjtx-off {
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.wsjtx-mode-panel {
+  margin: 2px 8px 8px 8px;
+  padding: 8px 10px;
+  border-left: 3px solid var(--warn);
+  background: var(--warn-subtle);
+  border-radius: 4px;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--text-primary);
+}
+.wsjtx-mode-panel.hidden, .wsjtx-mode-panel .hidden { display: none; }
+.wsjtx-mode-title { font-weight: 700; color: var(--warn); margin-bottom: 4px; }
+.wsjtx-mode-card .wsjtx-mode-title { font-size: 16px; margin-bottom: 6px; }
+.station-setup-card.wsjtx-mode-card { border-color: var(--warn); }
+.wsjtx-mode-line { margin-bottom: 6px; }
+.wsjtx-mode-state { font-weight: 700; margin-bottom: 6px; color: var(--warn); }
+.wsjtx-mode-state.heard { color: var(--accent-green); }
+.wsjtx-mode-buttons { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+.wsjtx-mode-btn {
+  font: inherit;
+  font-size: 13px;
+  padding: 5px 10px;
+  border-radius: 5px;
+  border: 1px solid var(--border-secondary);
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  cursor: pointer;
+}
+.wsjtx-mode-card .wsjtx-mode-btn { font-size: 15px; padding: 7px 14px; }
+.wsjtx-mode-btn:hover { background: var(--bg-hover); }
+.wsjtx-mode-btn.primary {
+  background: var(--warn);
+  border-color: var(--warn);
+  color: var(--bg-primary);
+  font-weight: 700;
+}
+.wsjtx-mode-btn.primary:hover { filter: brightness(1.1); background: var(--warn); }
+/* Station Setup top line while WSJT-X Mode is on (#547) */
+.ss-notice { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 0 0 10px; padding: 8px 12px; border-left: 3px solid var(--warn); background: var(--warn-subtle); border-radius: 6px; color: var(--text-primary); font-size: 15px; }
+.ss-notice.hidden { display: none; }
+.ss-notice-text { flex: 1 1 240px; font-weight: 600; }
 
 /* Settings > Cloud > POTACAT Tunnel: the live <callsign>.potacat.com link had
    no colour of its own and fell back to the browser's default link blue,

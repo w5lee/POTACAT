@@ -755,6 +755,14 @@ html, body {
   flex-shrink: 0;
 }
 
+/* The owner holds the radio this Guest Pass rides on (pass-paused, #541):
+   a wrapping line in the station orange, not the one-line summary. */
+#pass-banner.pass-held {
+  color: var(--sota);
+  white-space: normal;
+  font-size: 13px;
+}
+
 /* --- Filter Toolbar --- */
 #filter-toolbar {
   flex-shrink: 0;
@@ -4621,6 +4629,40 @@ body.popout-mode .popout-only { display: flex; }
 .fav-star svg { width: 18px; height: 18px; }
 .lmk-group.fav-group { color: var(--fav); }
 
+/* WSJT-X Mode at the shack (#547): the caution amber of the theme. */
+:root {
+  --wsjtx-warn: var(--sota);
+  --wsjtx-warn-subtle: color-mix(in srgb, var(--sota) 16%, var(--bg-card));
+}
+:root[data-ds] {
+  --wsjtx-warn: var(--ds-warn);
+  --wsjtx-warn-subtle: var(--ds-warn-subtle);
+}
+.wsjtx-mode-chip {
+  font: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  margin-right: 6px;
+  border-radius: 4px;
+  border: 1px solid var(--wsjtx-warn);
+  background: var(--wsjtx-warn-subtle);
+  color: var(--wsjtx-warn);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.wsjtx-mode-chip.hidden { display: none; }
+#wsjtx-mode-note {
+  background: var(--wsjtx-warn-subtle);
+  color: var(--text);
+  border-bottom: 1px solid var(--wsjtx-warn);
+  border-left: 3px solid var(--wsjtx-warn);
+  font-size: 13px;
+  line-height: 1.4;
+  padding: 6px 10px;
+}
+#wsjtx-mode-note.hidden { display: none; }
+
 /* ── Mail tab (Winlink) ─────────────────────────────────────────────────
    The W0 layout (2026-11-12): one column on a phone; two panes, the list
    beside the open screen, once the Mail view is 700 px wide. Roles, not
@@ -4740,6 +4782,8 @@ body.popout-mode .popout-only { display: flex; }
 .mail-seg-1 { grid-template-columns: minmax(0, 1fr); }
 .mail-seg-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .mail-seg-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+/* Five folders (#475): three over two, so each word stays whole at phone width. */
+.mail-seg-5 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .mail-seg-btn {
   min-height: 44px; min-width: 0; padding: 4px 2px; border: 0; border-radius: 6px; background: transparent; color: var(--m-muted);
   font-family: inherit; font-size: 16px; font-weight: 700; line-height: 1.2; overflow-wrap: normal; word-break: normal; cursor: pointer;
@@ -4809,6 +4853,7 @@ body.popout-mode .popout-only { display: flex; }
 /* ── reading ── */
 .mail-read-actions { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 12px 0; flex-shrink: 0; }
 .mail-read-actions .mail-btn { flex: 1; min-width: 120px; }
+.mail-read-cc, .mail-read-note { padding-bottom: 8px; }
 .mail-read-body { max-width: 640px; font-size: 17px; line-height: 26px; white-space: pre-wrap; overflow-wrap: anywhere; -webkit-user-select: text; user-select: text; }
 .mail-read-atts { display: flex; flex-direction: column; gap: 8px; max-width: 640px; }
 .mail-att { display: flex; align-items: center; gap: 8px; }

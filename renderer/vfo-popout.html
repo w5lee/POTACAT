@@ -910,6 +910,7 @@
 <script src="../lib/freq-dots.js"></script>
 <script src="tx-eq-chain.js"></script>
 <script src="../lib/custom-cat-follow.js"></script>
+<script src="../lib/custom-cat-slider.js"></script>
 <script src="../lib/rig-power-view.js"></script>
 <script src="../lib/rig-bands.js"></script>
 <script src="../lib/vfo-layout.js"></script>
@@ -1189,6 +1190,12 @@ window.api.onRadioState((s) => {
     sec.style.display = s.power ? '' : 'none';
     sec.classList.toggle('visible', !!s.power);
   }
+  // #485: a radio that can be switched off over CAT but not on (the FTX-1)
+  // shows Power Off alone. Absent powerOn (an older main) keeps both.
+  if (s.powerOn != null) {
+    const onBtn = document.getElementById('vfo-power-on');
+    if (onBtn) onBtn.style.display = s.powerOn ? '' : 'none';
+  }
   // Active VFO + split badges — readback-fed from the radio (LZ3AW). The
   // VFO badge only appears once the rig reports B at least this session,
   // so single-VFO workflows keep today's clean strip.
@@ -1204,10 +1211,7 @@ window.api.onRadioState((s) => {
     const sb = document.getElementById('split-badge');
     if (sb) sb.style.display = s.split ? '' : 'none';
   }
-  if (s.customCatButtons) {
-    customCatButtons = s.customCatButtons;
-    buildCustomCatBtns();
-  }
+  if (s.customCatButtons) applyCustomCatPush(s.customCatButtons);
   updateDisplay();
   updateModeHighlight();
 });
@@ -1669,8 +1673,56 @@ function customSliderCommand(template, value) {
 }
 
 const customSliderTimers = {};
+// #526: every vfo-radio-state push carries the custom CAT list. Rebuilding on
+// each one replaced a slider under the operator's finger and the new one
+// started at its minimum. Rules in lib/custom-cat-slider.js.
+const customSliderLast = {};      // slot key -> the value last moved to in this window
+let customSliderSaved = {};       // slot key -> the saved value as last pushed
+let customCatSig = null;          // definitions the controls were built from
+let customSliderHeld = false;     // pointer down on a custom slider
+let customSliderInputAt = 0;      // last input event (keyboard moves count too)
+let customCatPending = false;     // a rebuild waits for the drag to end
+const customSliderBusy = () => customSliderHeld || (Date.now() - customSliderInputAt) < 600;
+
+function applyCustomCatPush(list) {
+  customCatButtons = list;
+  const moved = CustomCatSlider.savedValueChanges(list, customSliderSaved);
+  customSliderSaved = CustomCatSlider.savedValues(list);
+  const busy = customSliderBusy();
+  const plan = CustomCatSlider.plan(customCatSig, list, busy);
+  if (plan === 'defer') { customCatPending = true; flushCustomCatLater(); return; }
+  if (plan === 'rebuild') {
+    for (const key of Object.keys(moved)) customSliderLast[key] = moved[key];
+    buildCustomCatBtns();
+    return;
+  }
+  // Same slots: show a saved value that moved elsewhere (the main window's
+  // slider), in place, unless this window's slider is being moved.
+  if (busy) return;
+  for (const key of Object.keys(moved)) {
+    customSliderLast[key] = moved[key];
+    document.querySelectorAll('.custom-cat-slider.custom-cat-injected').forEach((el) => {
+      if (el._key !== key) return;
+      const r = el.querySelector('input[type="range"]'), v = el.querySelector('.ccs-val');
+      if (r) r.value = moved[key];
+      if (v) v.textContent = r ? r.value : moved[key];
+    });
+  }
+}
+function flushCustomCatLater() {
+  setTimeout(() => {
+    if (!customCatPending) return;
+    if (customSliderBusy()) { flushCustomCatLater(); return; }
+    customCatPending = false;
+    buildCustomCatBtns();
+  }, 650);
+}
+window.addEventListener('pointerup', () => { customSliderHeld = false; }, true);
+window.addEventListener('pointercancel', () => { customSliderHeld = false; }, true);
 
 function buildCustomCatBtns() {
+  customCatSig = CustomCatSlider.definitionSignature(customCatButtons);
+  customCatPending = false;
   // Remove any previously injected custom controls
   document.querySelectorAll('.custom-cat-injected').forEach(el => el.remove());
   // Buttons, toggles AND sliders. A toggle used to be drawn as a plain button
@@ -1686,8 +1738,8 @@ function buildCustomCatBtns() {
     btns.forEach(b => {
       if (row.id === 'mini-cat' && !vfoSmall.cat.includes(VfoLayout.CUSTOM_PREFIX + b.name)) return;
       if (b.type === 'slider') {
-        const lo = Number.isFinite(b.min) ? b.min : 0;
-        const hi = Number.isFinite(b.max) ? b.max : 255;
+        const { lo, hi } = CustomCatSlider.range(b);
+        const key = CustomCatSlider.slotKey(b);
         const wrap = document.createElement('span');
         wrap.className = 'custom-cat-slider custom-cat-injected';
         const lbl = document.createElement('span');
@@ -1698,16 +1750,18 @@ function buildCustomCatBtns() {
         range.className = 'ccs-range';
         range.min = lo;
         range.max = hi;
-        range.value = Number.isFinite(b.value) ? b.value : lo;
+        range.value = CustomCatSlider.startValue(b, customSliderLast[key]);
         range.title = b.command;
         const val = document.createElement('span');
         val.className = 'ccs-val';
         val.textContent = range.value;
+        range.addEventListener('pointerdown', () => { customSliderHeld = true; });
         range.addEventListener('input', () => {
           val.textContent = range.value;
+          customSliderLast[key] = +range.value;
+          customSliderInputAt = Date.now();
           // Debounced like the main window's: dragging a slider must not
           // fire a CAT command per pixel.
-          const key = b.name + '|' + b.command;
           if (customSliderTimers[key]) clearTimeout(customSliderTimers[key]);
           customSliderTimers[key] = setTimeout(() => {
             customSliderTimers[key] = null;
@@ -1721,7 +1775,7 @@ function buildCustomCatBtns() {
             if (v) v.textContent = range.value;
           });
         });
-        wrap._key = b.name + '|' + b.command;
+        wrap._key = key;
         wrap.appendChild(lbl);
         wrap.appendChild(range);
         wrap.appendChild(val);
@@ -4396,7 +4450,8 @@ function buildKiwiStationList(s) {
     const clean = kiwiCleanHost(host);
     if (!clean) return;
     const parts = clean.split(':');
-    kiwiStations.push({ label: label || parts[0], host: parts[0], port: parseInt(parts[1], 10) || 8073, fullHost: clean });
+    // tls: entered as https:// (a KiwiSDR with HTTPS on: its audio is wss://).
+    kiwiStations.push({ label: label || parts[0], host: parts[0], port: parseInt(parts[1], 10) || 8073, fullHost: clean, tls: /^\s*https:\/\//i.test(host) });
   });
   // Build select (for settings reference)
   kiwiStationSelect.innerHTML = '<option value="">-- select station --</option>';
@@ -4449,7 +4504,7 @@ function kiwiTryConnect(st) {
   // all must not leave "Connecting..." up for good.
   clearTimeout(kiwiTryTimer);
   kiwiTryTimer = setTimeout(() => { if (kiwiTrying === st && !kiwiConnected) kiwiNoteFailure(st.fullHost, 'did not answer'); }, 20000);
-  window.api.kiwiConnect({ host: st.host, port: st.port });
+  window.api.kiwiConnect({ host: st.host, port: st.port, tls: !!st.tls });
   kiwiConnectedHost = st.fullHost;
   updateKiwiButtonStates();
 }

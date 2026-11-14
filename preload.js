@@ -139,6 +139,13 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.on('remote-client-ptt-released', handler);
     return () => ipcRenderer.removeListener('remote-client-ptt-released', handler);
   },
+  // Guest Pass: the owner took the radio back ({paused:true}) or handed it
+  // back ({paused:false}). #541
+  onRemotePassHold: (cb) => {
+    const handler = (_e, info) => cb(info || {});
+    ipcRenderer.on('remote-pass-hold', handler);
+    return () => ipcRenderer.removeListener('remote-pass-hold', handler);
+  },
   onRemoteClientDisplaced: (cb) => {
     const handler = (_e, info) => cb(info);
     ipcRenderer.on('remote-client-displaced', handler);
@@ -369,6 +376,10 @@ contextBridge.exposeInMainWorld('api', {
   onCatLogHistory: (cb) => ipcRenderer.on('cat-log-history', (_e, lines) => cb(lines)),
   markBugReportStart: () => ipcRenderer.invoke('bug-report-mark'),
   getBugReportLog: () => ipcRenderer.invoke('get-bug-report-log'),
+  // #463: macOS microphone permission (lib/mac-mic-access.js; main decides, off macOS a no-op).
+  macMicCaptureStart: (surface) => ipcRenderer.invoke('mac-mic-capture-start', surface),
+  macMicSilence: (o) => ipcRenderer.send('mac-mic-silence', o),
+  onMacMicNotice: (cb) => ipcRenderer.on('mac-mic-notice', (_e, d) => cb(d)),
   lotwLocations: () => ipcRenderer.invoke('lotw-locations'),
   lotwUpload: (opts) => ipcRenderer.invoke('lotw-upload', opts),
   lotwDownloadConfirmations: (opts) => ipcRenderer.invoke('lotw-download-confirmations', opts),

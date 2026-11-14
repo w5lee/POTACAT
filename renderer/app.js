@@ -328,7 +328,7 @@ setInterval(pruneHiddenSpots, 60000);
 let enableLogging = false;
 let enableBannerLogger = false;
 let n1mmRst = false; // N1MM-style single-field RST inputs
-let defaultPower = 100;
+let defaultPower = 0; // the operator's own Default TX Power (W), 0 = none (#523)
 let tuneClick = false;
 let qsoChime = 'off'; // 'off' | 'soft' | 'twotone' | 'bell' | 'morse-r' — see playQsoChime
 let enableSplit = false;
@@ -353,6 +353,8 @@ let activeRigCatLabel = '';
 let remoteShack = { remote: false };
 function catPillLabel() {
   if (remoteShack.remote) return 'RMT';
+  // WSJT-X Mode: POTACAT has no radio link, and the pill says so (#547).
+  if (enableWsjtx && typeof WsjtxModeNotice !== 'undefined') return WsjtxModeNotice.catPill().label;
   const s = String(activeRigCatLabel || '').trim().toUpperCase().slice(0, 4);
   return s || 'CAT';
 }
@@ -555,6 +557,7 @@ let activatorParkGrid = '';   // Maidenhead grid for active park (auto from lat/
 let activatorParkGridFromPark = ''; // the primary park's own grid, from its position
 let activatorParkGrids = {};  // settings.activatorParkGrids: the operator's grid per park (lib/park-grid.js, #388)
 let hunterParkRefs = [];      // [{ref:'K-5678', name:'Shenandoah NF', program:'POTA'}]  max MAX_N_FER, resets per QSO; program drives ADIF SIG (default POTA)
+let hunterParkCall = '';      // the callsign their park came with; a different call clears it (lib/p2p-park-entry.js, #506)
 let activatorContacts = []; // in-memory QSO list for current activation session
 
 // Look up whether `call` would be a POTA dupe in the current activation —
@@ -1443,6 +1446,7 @@ const setVaraCableIn = document.getElementById('set-vara-cable-in');
 const setVaraCableOut = document.getElementById('set-vara-cable-out');
 const setWinlinkCap = document.getElementById('set-winlink-cap');
 const setWinlinkPrediction = document.getElementById('set-winlink-prediction');
+const setWinlinkDeletedDays = document.getElementById('set-winlink-deleted-days'); // #475: 7 | 30 | 90 | 0 (never)
 const setWinlinkAutoRetry = document.getElementById('set-winlink-auto-retry');
 const setWinlinkRecordAudio = document.getElementById('set-winlink-record-audio');
 const setWinlinkPatPath = document.getElementById('set-winlink-pat-path');
@@ -1671,21 +1675,38 @@ const catPopoverRigs = document.getElementById('cat-popover-rigs');
 const catPopoverWsjtx = document.getElementById('cat-popover-wsjtx');
 const catPopoverWsjtxPort = document.getElementById('cat-popover-wsjtx-port');
 const catPopoverWsjtxPortInput = document.getElementById('cat-popover-wsjtx-port-input');
-const catPopoverWsjtxWarning = document.getElementById('cat-popover-wsjtx-warning');
-const catPopoverWsjtxWarnPort = document.getElementById('cat-popover-wsjtx-warn-port');
-// True when WSJT-X is currently heartbeating us. N3VD 2026-05-24 hit a dead
-// CAT for ~an hour because WSJT-X Mode was checked but WSJT-X wasn't running —
-// connectCat() bails on enableWsjtx so direct CAT never starts, and the only
-// way out is unchecking the box. We surface that exact state in the popover
-// instead of letting users guess.
+const catPopoverWsjtxPanel = document.getElementById('cat-popover-wsjtx-panel');
+// WSJT-X Mode, impossible to miss (#547). N3VD 2026-05-24 hit a dead CAT for
+// ~an hour because WSJT-X Mode was checked but WSJT-X wasn't running, and the
+// pill was GREEN. Now: an amber "WSJT-X Mode" chip first in the status bar,
+// the CAT pill reads "CAT: off", and the CAT menu opens with a panel that says
+// whether WSJT-X is heard and turns the mode off in one click. Main decides
+// "heard" (a Heartbeat/Status in the last 60 s); lib/wsjtx-mode-notice.js
+// holds the rule and every word.
 let wsjtxConnected = false;
+let wsjtxHeard = false;       // from main, with every wsjtx-status
+let wsjtxEverHeard = false;   // this run: the start notice never shows after it
+let wsjtxNoticeKept = false;  // "Keep it on" on the start notice, until next start
+let wsjtxWatchPort = 2237;    // the UDP port the panel names
+function wsjtxModeWords() {
+  return (typeof WsjtxModeNotice !== 'undefined') ? WsjtxModeNotice : null;
+}
 function updateCatPopoverWsjtxWarning() {
-  if (!catPopoverWsjtxWarning) return;
-  const show = enableWsjtx && !wsjtxConnected;
-  catPopoverWsjtxWarning.classList.toggle('hidden', !show);
-  if (show && catPopoverWsjtxWarnPort) {
-    catPopoverWsjtxWarnPort.textContent = catPopoverWsjtxPortInput.value || '2237';
-  }
+  const W = wsjtxModeWords();
+  if (!catPopoverWsjtxPanel || !W) return;
+  catPopoverWsjtxPanel.classList.toggle('hidden', !enableWsjtx);
+  if (!enableWsjtx) return;
+  const p = W.panel({ heard: wsjtxHeard, port: catPopoverWsjtxPortInput.value || wsjtxWatchPort });
+  document.getElementById('wsjtx-panel-title').textContent = p.title;
+  document.getElementById('wsjtx-panel-line').textContent = p.line;
+  const stateEl = document.getElementById('wsjtx-panel-state');
+  stateEl.textContent = p.state;
+  stateEl.classList.toggle('heard', wsjtxHeard);
+  const hintEl = document.getElementById('wsjtx-panel-hint');
+  hintEl.textContent = p.hint;
+  hintEl.classList.toggle('hidden', !p.hint);
+  document.getElementById('wsjtx-panel-off').classList.toggle('primary', p.primary === 'off');
+  document.getElementById('wsjtx-panel-keep').classList.toggle('primary', p.primary === 'keep');
 }
 let catPopoverOpen = false;
 
@@ -1783,7 +1804,8 @@ function renderRemotePowerRow(info) {
     window.api.rigControl({ action: 'power-off' });
   });
   row.appendChild(label);
-  row.appendChild(on);
+  // #485: an off-only radio (the FTX-1) gets no Power On.
+  if (info.canPowerOn !== false) row.appendChild(on);
   row.appendChild(off);
   return row;
 }
@@ -1930,6 +1952,7 @@ async function openCatPopover(anchor) {
   // WSJT-X toggle
   catPopoverWsjtx.checked = settings.enableWsjtx === true;
   catPopoverWsjtxPortInput.value = settings.wsjtxPort || 2237;
+  wsjtxWatchPort = settings.wsjtxPort || 2237;
   catPopoverWsjtxPort.classList.toggle('hidden', !settings.enableWsjtx);
   updateCatPopoverWsjtxWarning();
 
@@ -1978,18 +2001,70 @@ catPopoverWsjtx.addEventListener('change', async () => {
     return;
   }
   catPopoverWsjtxPort.classList.toggle('hidden', !enabled);
-  const port = parseInt(catPopoverWsjtxPortInput.value, 10) || 2237;
+  await setWsjtxMode(enabled);
+});
+
+// Turn WSJT-X Mode on or off: exactly what the CAT menu checkbox always did
+// (save, update the chip, close the menu). Turning it OFF needs no confirm;
+// the panel, the start notice and Station Setup all call this (#547).
+async function setWsjtxMode(enabled) {
+  const port = parseInt(catPopoverWsjtxPortInput.value, 10) || wsjtxWatchPort || 2237;
   await window.api.saveSettings({ enableWsjtx: enabled, wsjtxPort: port });
   enableWsjtx = enabled;
+  if (typeof setEnableWsjtx !== 'undefined' && setEnableWsjtx) {
+    setEnableWsjtx.checked = enabled;
+    if (typeof wsjtxConfig !== 'undefined' && wsjtxConfig) wsjtxConfig.classList.toggle('hidden', !enabled);
+  }
   updateWsjtxStatusVisibility();
   closeCatPopover();
+}
+function turnOffWsjtxMode() { return setWsjtxMode(false); }
+
+document.getElementById('wsjtx-panel-off').addEventListener('click', (e) => { e.stopPropagation(); turnOffWsjtxMode(); });
+document.getElementById('wsjtx-panel-keep').addEventListener('click', (e) => { e.stopPropagation(); closeCatPopover(); });
+
+// The amber chip opens the same menu, anchored to itself.
+function openCatPopoverFromWsjtxChip(e) {
+  if (e) e.stopPropagation();
+  if (catPopoverOpen) { closeCatPopover(); return; }
+  if (typeof closeRigPopover === 'function') closeRigPopover();
+  _catPopoverAnchor = wsjtxStatusEl;
+  openCatPopover();
+}
+wsjtxStatusEl.addEventListener('click', openCatPopoverFromWsjtxChip);
+wsjtxStatusEl.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openCatPopoverFromWsjtxChip(e); }
 });
+
+// Start notice: 30 s after start, with the mode on and WSJT-X never heard.
+const wsjtxModeCard = document.getElementById('wsjtx-mode-card');
+function updateWsjtxModeCard() {
+  const W = wsjtxModeWords();
+  if (!wsjtxModeCard || !W) return;
+  const n = W.startNotice({ mode: enableWsjtx, heard: wsjtxHeard, everHeard: wsjtxEverHeard, kept: wsjtxNoticeKept });
+  if (!n || !wsjtxModeCard.dataset.due) { wsjtxModeCard.classList.add('hidden'); return; }
+  document.getElementById('wsjtx-card-title').textContent = n.title;
+  document.getElementById('wsjtx-card-text').textContent = n.line;
+  wsjtxModeCard.classList.remove('hidden');
+}
+document.getElementById('wsjtx-card-off').addEventListener('click', () => {
+  wsjtxModeCard.classList.add('hidden');
+  turnOffWsjtxMode();
+});
+document.getElementById('wsjtx-card-keep').addEventListener('click', () => {
+  wsjtxNoticeKept = true;
+  wsjtxModeCard.classList.add('hidden');
+});
+setTimeout(() => {
+  if (wsjtxModeCard) wsjtxModeCard.dataset.due = '1';
+  updateWsjtxModeCard();
+}, (typeof WsjtxModeNotice !== 'undefined' && WsjtxModeNotice.START_NOTICE_DELAY_MS) || 30000);
 
 catPopoverWsjtxPortInput.addEventListener('click', (e) => e.stopPropagation());
 
 // Close popover on outside click
 document.addEventListener('click', (e) => {
-  if (catPopoverOpen && !catPopover.contains(e.target) && e.target !== catStatusEl && e.target !== document.getElementById('activator-cat-status')) {
+  if (catPopoverOpen && !catPopover.contains(e.target) && e.target !== catStatusEl && e.target !== wsjtxStatusEl && e.target !== document.getElementById('activator-cat-status')) {
     closeCatPopover();
   }
 });
@@ -2192,7 +2267,7 @@ async function loadPrefs() {
   }
   n1mmRst = settings.n1mmRst === true;
   applyRstMode();
-  defaultPower = parseInt(settings.defaultPower, 10) || 100;
+  defaultPower = LogTxPower.operatorDefaultPower(settings);
   updateLoggingVisibility();
   updateBannerLoggerVisibility();
   showBearing = settings.showBearing === true;
@@ -2232,6 +2307,7 @@ async function loadPrefs() {
   activeRigCatLabel = activeRig ? (activeRig.catLabel || '') : '';
   refreshCatPillLabel();
   enableWsjtx = settings.enableWsjtx === true;
+  wsjtxWatchPort = settings.wsjtxPort || 2237;
   updateWsjtxStatusVisibility();
   // CW Keyer: init MIDI + connect saved device on load (requires pi access)
   if (settings.enableCwKeyer) {
@@ -2819,6 +2895,11 @@ let currentRigs = []; // local copy of settings.rigs
 // A passing Test checks the EDITOR's port, not the saved radio's, and four
 // operators read "Connected!" as done while the saved rig had no port and the
 // live link kept failing (KK6EZA, arys64/KO6BAH, NJ2DX). Say so on the result.
+// A passing test while WSJT-X Mode holds the radio: main left the radio to
+// WSJT-X instead of keeping the link, and says where to change that (#407).
+function rigTestWsjtxNote(result) {
+  return result && result.wsjtxNote ? ' ' + result.wsjtxNote : '';
+}
 function rigTestSavedNote(portPath) {
   const norm = (p) => String(p || '').trim().toUpperCase();
   const rig = editingRigId ? currentRigs.find(r => r && r.id === editingRigId) : null;
@@ -4193,7 +4274,26 @@ function updateDxccButton() {
 }
 
 function updateWsjtxStatusVisibility() {
+  // The chip reads "WSJT-X Mode" whenever the mode is on (#547); whether
+  // WSJT-X is heard is in the panel it opens, not the chip's colour.
+  const W = (typeof WsjtxModeNotice !== 'undefined') ? WsjtxModeNotice : null;
   wsjtxStatusEl.classList.toggle('hidden', !enableWsjtx);
+  if (W) {
+    const c = W.chip();
+    wsjtxStatusEl.textContent = c.label;
+    wsjtxStatusEl.title = c.title;
+  }
+  // The CAT pill follows: "CAT: off" in neutral grey while the mode is on.
+  if (enableWsjtx && !remoteShack.remote && W) {
+    catStatusEl.textContent = catPillLabel();
+    catStatusEl.className = 'status wsjtx-off';
+    catStatusEl.title = W.catPill().title;
+    syncActivatorCatPill('status wsjtx-off', W.catPill().title);
+  } else {
+    refreshCatPillLabel();
+  }
+  if (typeof updateCatPopoverWsjtxWarning === 'function') updateCatPopoverWsjtxWarning();
+  if (typeof updateWsjtxModeCard === 'function') updateWsjtxModeCard();
 }
 
 function updateSettingsConnBar() {
@@ -4702,7 +4802,7 @@ async function saveBannerQso() {
       callsign: callsigns.join(','),
       frequency: String(freqKhz),
       mode, qsoDate, timeOn, rstSent, rstRcvd, band,
-      // No txPower: main fills the radio's live power, else the default.
+      // No txPower: main fills the radio's power (read or set), else the operator's default, else none (#523).
       // A park goes with a program only: no sig, no park (main records
       // sigInfo in the worked-parks list).
       sig, sigInfo: sig ? allRefs.filter(Boolean).join(',') : '', potaRef, sotaRef, wwffRef, llotaRef, wwbotaRef,
@@ -5093,7 +5193,8 @@ document.getElementById('qrz-download-btn').addEventListener('click', async () =
   try {
     const result = await window.api.qrzDownloadLogbook();
     if (result.ok) {
-      statusEl.textContent = `Imported ${result.imported} new QSOs (${result.total} total in QRZ)`;
+      statusEl.textContent = `Imported ${result.imported} new QSOs (${result.total} total in QRZ)` +
+        (result.updated > 0 ? `, ${result.updated} updated with confirmations` : '');
       statusEl.style.color = '#4ecca3';
     } else {
       statusEl.textContent = result.error || 'Download failed';
@@ -5271,15 +5372,11 @@ function renderNetList(nets) {
     info.className = 'net-item-info';
     const nameEl = document.createElement('div');
     nameEl.className = 'net-item-name';
-    nameEl.textContent = net.name;
+    nameEl.textContent = NetReminderRow.title(net);
+    nameEl.title = nameEl.textContent;
     const detailEl = document.createElement('div');
     detailEl.className = 'net-item-detail';
-    const schedStr = net.schedule?.type === 'weekly'
-      ? ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].filter((_,i) => (net.schedule.days || []).includes(i)).join(', ')
-      : net.schedule?.type === 'dates'
-        ? (net.schedule.dates || []).join(', ')
-        : 'Daily';
-    detailEl.textContent = `${FreqDots.khzMhz(net.frequency) || net.frequency} ${net.mode} \u2022 ${net.startTime} ${net.timeZone === 'utc' ? 'UTC' : 'Local'} \u2022 ${schedStr}`;
+    detailEl.textContent = NetReminderRow.detail(net);
     info.appendChild(nameEl);
     info.appendChild(detailEl);
 
@@ -5943,9 +6040,16 @@ if (setMercuryEnable) {
       acctStatus.textContent = 'Checking… (the first check starts Winlink, a few seconds)';
       const r = await window.api.winlinkAccountCheck();
       if (!r || !r.ok) { acctStatus.textContent = (r && r.error) || 'Could not check'; return; }
-      acctStatus.textContent = r.exists ? `${r.callsign} has a Winlink account.` : `${r.callsign} has no Winlink account yet.`;
+      acctStatus.textContent = r.exists ? `${r.callsign} has a Winlink account. Checking the password…` : `${r.callsign} has no Winlink account yet.`;
       regBox.classList.toggle('hidden', !!r.exists);
-      if (r.exists) showWinlinkRecovery(); else if (recBox) recBox.classList.add('hidden');
+      // Reading the recovery address needs the saved password, so Winlink
+      // checks it there: a wrong password shows now, not at the first
+      // session (#435). No radio, no session, nothing sent.
+      if (r.exists) showWinlinkRecovery().then((pw) => {
+        const said = pw && window.WinlinkMailView ? window.WinlinkMailView.passwordCheck(pw).text : '';
+        acctStatus.textContent = `${r.callsign} has a Winlink account.${said ? ' ' + said : ''}`;
+      });
+      else if (recBox) recBox.classList.add('hidden');
     });
     // An existing account's recovery address: read through Pat with the
     // saved password, changed in place.
@@ -5960,6 +6064,7 @@ if (setMercuryEnable) {
       const r = await window.api.winlinkRecoveryEmailGet();
       if (r && r.ok) recCurrent.textContent = r.email || 'none set';
       else { recCurrent.textContent = 'unknown'; recStatus.textContent = (r && r.error) || 'Could not read it (is your Winlink password saved?)'; }
+      return r || { ok: false, error: '' };
     }
     const recChange = document.getElementById('winlink-recovery-change');
     if (recChange) recChange.addEventListener('click', async () => {
@@ -6181,15 +6286,18 @@ lotwUploadBtn.addEventListener('click', async () => {
   }
   lotwUploadBtn.disabled = false;
 });
-lotwDownloadBtn.addEventListener('click', async () => {
+const lotwDownloadAllBtn = document.getElementById('lotw-download-all-btn');
+async function runLotwDownload(all) {
   if (!window.api || !window.api.lotwDownloadConfirmations) return;
   lotwDownloadBtn.disabled = true;
+  if (lotwDownloadAllBtn) lotwDownloadAllBtn.disabled = true;
   lotwDownloadResult.style.color = '';
   lotwDownloadResult.textContent = 'Downloading from LoTW...';
   try {
     const r = await window.api.lotwDownloadConfirmations({
       login: setLotwLogin.value.trim(),
       password: setLotwWebPassword.value,
+      all: !!all,
     });
     lotwDownloadResult.textContent = r.message || (r.ok ? 'Done.' : 'Download failed.');
     lotwDownloadResult.style.color = r.ok ? '#4ecca3' : '#e94560';
@@ -6198,7 +6306,10 @@ lotwDownloadBtn.addEventListener('click', async () => {
     lotwDownloadResult.style.color = '#e94560';
   }
   lotwDownloadBtn.disabled = false;
-});
+  if (lotwDownloadAllBtn) lotwDownloadAllBtn.disabled = false;
+}
+lotwDownloadBtn.addEventListener('click', () => runLotwDownload(false));
+if (lotwDownloadAllBtn) lotwDownloadAllBtn.addEventListener('click', () => runLotwDownload(true));
 
 // Club Log — checkbox toggles config; bulk button sends the whole log.
 setClublogEnable.addEventListener('change', () => {
@@ -8098,6 +8209,7 @@ async function _remoteRadiosRefreshList() {
     const dotClass = (() => {
       if (isActive && status.state === 'connected') return 'connected';
       if (isActive && status.state === 'auth-fail') return 'expired';
+      if (isActive && (status.state === 'waiting' || status.state === 'standby')) return '';
       if (t.expiresAt != null && t.expiresAt < Date.now()) return 'expired';
       if (t.lastConnectedAt && (Date.now() - t.lastConnectedAt > 7 * 86400 * 1000)) return 'unreachable';
       return '';
@@ -8115,8 +8227,31 @@ async function _remoteRadiosRefreshList() {
     else trustBadgeHtml = '<span class="rr-badge guest">Guest</span>';
     const expBadgeHtml = expBadgeRaw ? '<span class="rr-badge leg">' + _esc(expBadgeRaw) + '</span>' : '<span class="rr-badge leg">no expiry</span>';
     const legBadge = (isActive && status.leg) ? '<span class="rr-badge leg">via ' + _esc(status.leg) + '</span>' : '';
+    // Guest Pass wording comes from lib/pass-wording.js, the same words
+    // ECHOCAT Web uses: a waiting pass never reads as a dead one (#541).
+    const passWords = (w) => (w.title ? '<b>' + _esc(w.title) + '</b>' : '') + (w.title && w.line ? ' ' : '') + _esc(w.line || '');
+    const passOwner = t.ownerCallsign || '';
     const stateLine = (() => {
       if (isActive && status.state === 'connected') return '<b>Connected.</b> Last used ' + _esc(fmtAge(t.lastConnectedAt));
+      if (t.kind === 'pass' && window.PassWording) {
+        if (isActive && status.state === 'waiting') {
+          return passWords(PassWording.describe({ kind: 'auth-fail', code: status.code, at: status.passAt, reason: status.passReason, by: status.by, owner: passOwner }));
+        }
+        if (isActive && status.state === 'auth-fail') {
+          return passWords(PassWording.describe({ kind: 'auth-fail', code: status.code, at: status.passAt, reason: status.passReason, owner: passOwner, endsAt: t.expiresAt }));
+        }
+        if (isActive && status.state === 'standby') {
+          return passWords(PassWording.describe({ kind: 'kicked', device: _remoteStandbyDevice, owner: passOwner }));
+        }
+        if (t.passEndReason && PassWording.isTerminalEndReason(t.passEndReason)) {
+          return passWords(PassWording.describe({ kind: 'pass-ended', reason: t.passEndReason, owner: passOwner, endsAt: t.expiresAt }));
+        }
+        if (!isActive && t.passSessionClosed && !(t.expiresAt != null && t.expiresAt <= Date.now())) {
+          return passWords(PassWording.describe({ kind: 'pass-ended', reason: 'left', owner: passOwner }));
+        }
+      }
+      if (isActive && status.state === 'waiting') return '<b>Waiting for the shack.</b> Trying again.';
+      if (isActive && status.state === 'standby') return '<b>Standing by.</b> Another device has the rig.';
       if (isActive && status.state === 'connecting') return '<b>Connecting&hellip;</b>';
       if (isActive && status.state === 'authing') return '<b>Authenticating&hellip;</b>';
       if (isActive && status.state === 'auth-fail') {
@@ -8128,7 +8263,9 @@ async function _remoteRadiosRefreshList() {
       }
       if (isActive && status.state === 'disconnected') return '<b>Reconnecting&hellip;</b>';
       if (t.kind === 'pass' && t.expiresAt != null && t.expiresAt <= Date.now()) {
-        return '<b>Session ended.</b> Ask the owner for a fresh pass to reconnect.';
+        return window.PassWording
+          ? passWords(PassWording.describe({ kind: 'pass-ended', reason: 'expired', owner: passOwner, endsAt: t.expiresAt }))
+          : '<b>Session ended.</b> Ask the owner for a fresh pass to reconnect.';
       }
       return 'Last connected ' + _esc(fmtAge(t.lastConnectedAt));
     })();
@@ -8141,6 +8278,16 @@ async function _remoteRadiosRefreshList() {
       }
       if (isActive && (status.state === 'connecting' || status.state === 'authing' || status.state === 'disconnected')) {
         return '<button type="button" data-act="rr-disconnect" data-id="' + _esc(t.id) + '">Cancel</button>';
+      }
+      // Waiting out a busy rig / a Cloud check, or standing by after another
+      // device took the rig: ask now, or stop asking.
+      if (isActive && (status.state === 'waiting' || status.state === 'standby')) {
+        const label = status.state === 'waiting' ? 'Try now' : (t.kind === 'pass' ? 'Use it here instead' : 'Connect');
+        return '<button type="button" class="primary" data-act="rr-connect" data-id="' + _esc(t.id) + '">' + label + '</button>'
+          + '<button type="button" data-act="rr-disconnect" data-id="' + _esc(t.id) + '">Cancel</button>';
+      }
+      if (t.kind === 'pass' && !isActive && t.passSessionClosed && !(t.expiresAt != null && t.expiresAt <= Date.now())) {
+        return '<button type="button" class="primary" data-act="rr-connect" data-id="' + _esc(t.id) + '">Connect again</button>';
       }
       return '<button type="button" class="primary" data-act="rr-connect" data-id="' + _esc(t.id) + '">Connect</button>';
     })();
@@ -8394,7 +8541,16 @@ if (window.api && window.api.onLogError) {
   window.api.onLogError(_showLogErrorModal);
 }
 
-function _displacedBannerShow(info) {
+// The platform of the device that took the rig, for the Remote Radios row.
+let _remoteStandbyDevice = '';
+// The owner holds the radio this Guest Pass rides on (pass-paused).
+let _remotePassHeld = false;
+
+// Guest Pass notices (#541): waiting for a busy rig or a Cloud check, the
+// owner holding the radio, a session closed with the pass still good, or
+// the pass over. Same bar as the displacement banner; the words come from
+// lib/pass-wording.js (shared with ECHOCAT Web). action: {label, targetId}.
+function _passBannerShow(words, targetId) {
   let banner = document.getElementById('displaced-banner');
   if (!banner) {
     banner = document.createElement('div');
@@ -8402,6 +8558,46 @@ function _displacedBannerShow(info) {
     banner.className = 'displaced-banner';
     document.body.appendChild(banner);
   }
+  banner.classList.toggle('pass-good', !!words.stillGood || !words.terminal);
+  const msg = (words.title ? '<b>' + _esc(words.title) + '</b>' : '') + (words.title && words.line ? ' ' : '') + _esc(words.line || '');
+  banner.innerHTML = '<div class="displaced-banner-msg">' + msg + '</div>'
+    + '<div class="displaced-banner-actions">'
+    + (words.action && targetId ? '<button type="button" id="pass-banner-act" class="primary">' + _esc(words.action) + '</button>' : '')
+    + '<button type="button" id="displaced-dismiss">Dismiss</button>'
+    + '</div>';
+  banner.classList.remove('hidden');
+  banner.dataset.kind = 'pass';
+  document.getElementById('displaced-dismiss').addEventListener('click', () => banner.classList.add('hidden'));
+  const act = document.getElementById('pass-banner-act');
+  if (act) act.addEventListener('click', async () => {
+    banner.classList.add('hidden');
+    try { await window.api.connectionTargetsActivate(targetId); } catch (err) { alert('Connect failed: ' + (err.message || err)); }
+    _remoteRadiosRefreshList();
+  });
+}
+function _passBannerHide() {
+  const banner = document.getElementById('displaced-banner');
+  if (banner && banner.dataset.kind === 'pass') banner.classList.add('hidden');
+}
+
+function _displacedBannerShow(info) {
+  _remoteStandbyDevice = (info && info.byPlatform) || '';
+  if (info && info.kind === 'pass' && window.PassWording) {
+    // A guest's other device has the radio; the pass is fine.
+    window.api.connectionTargetsGetStatus().then((st) => {
+      _passBannerShow(PassWording.describe({ kind: 'kicked', device: info.byPlatform, owner: info.owner }), st && st.targetId);
+    }).catch(() => {});
+    return;
+  }
+  let banner = document.getElementById('displaced-banner');
+  if (!banner) {
+    banner = document.createElement('div');
+    banner.id = 'displaced-banner';
+    banner.className = 'displaced-banner';
+    document.body.appendChild(banner);
+  }
+  banner.dataset.kind = 'displaced';
+  banner.classList.remove('pass-good');
   const platform = (info.byPlatform || '').toLowerCase();
   const friendly = (() => {
     if (platform.includes('ios')) return '📱 Your iPhone took over the rig.';
@@ -8464,7 +8660,8 @@ if (window.api && window.api.onRemoteClientDisplaced) {
       const rtt = Number.isFinite(remoteShack.rttMs) ? (' · ' + remoteShack.rttMs + ' ms') : '';
       const silent = remoteShack.audioElsewhere ? ' · AUDIO ON ANOTHER DEVICE' : (remoteShack.audioSilent ? ' · NO AUDIO' : '');
       const also = (remoteShack.alsoConnected && remoteShack.alsoConnected.length) ? ' · +' + remoteShack.alsoConnected.length : '';
-      chip.textContent = '🔗 ' + name + rig + leg + rtt + also + silent;
+      const held = _remotePassHeld ? ' · OWNER HAS THE RADIO' : '';
+      chip.textContent = '🔗 ' + name + rig + leg + rtt + also + held + silent;
       chip.style.background = '#4ecca3';
       chip.style.color = '#0a1a14';
       // The chip shortens with "..." when the bar is full (#298); the whole line is here.
@@ -8476,21 +8673,43 @@ if (window.api && window.api.onRemoteClientDisplaced) {
       chip.style.background = '#d4a64a';
       chip.style.color = '#1a1a2e';
       chip.title = 'Dialing ' + name + '…';
+    } else if (state.state === 'waiting' || state.state === 'standby') {
+      // Not a dead link: waiting out a busy rig or a Cloud check, or another
+      // device has the rig and this PC stands by (#541).
+      const w = (window.PassWording && state.kind === 'pass')
+        ? (state.state === 'waiting'
+          ? PassWording.describe({ kind: 'auth-fail', code: state.code, at: state.passAt, reason: state.passReason, by: state.by, owner: state.owner })
+          : PassWording.describe({ kind: 'kicked', device: _remoteStandbyDevice, owner: state.owner }))
+        : null;
+      chip.textContent = '🔗 ' + name + (state.state === 'waiting' ? ' · waiting' : ' · standing by');
+      chip.style.background = 'var(--warn)';
+      chip.style.color = 'var(--bg-primary)';
+      chip.title = w ? [w.title, w.line].filter(Boolean).join(' ')
+        : (state.state === 'waiting' ? 'The shack asked this PC to wait — trying again' : 'Another device has the rig — open Remote Radios to take it back');
     } else if (state.state === 'disconnected') {
       chip.textContent = '🔗 ' + name + ' · reconnecting';
       chip.style.background = '#d4a64a';
       chip.style.color = '#1a1a2e';
       chip.title = 'Lost connection to ' + name + ' — auto-reconnecting';
+    } else if (state.state === 'auth-fail' && state.kind === 'pass' && window.PassWording) {
+      const w = PassWording.describe({ kind: 'auth-fail', code: state.code, at: state.passAt, reason: state.passReason, owner: state.owner, endsAt: state.endsAt });
+      chip.textContent = '🎟 ' + name + ' · pass not accepted';
+      chip.style.background = 'var(--accent-red)';
+      chip.style.color = 'var(--on-accent-red)';
+      chip.title = [w.title, w.line].filter(Boolean).join(' ');
     } else if (state.state === 'auth-fail') {
       chip.textContent = '🔗 ' + name + ' · re-pair';
       chip.style.background = '#e94560';
       chip.style.color = '#fff';
       chip.title = 'Auth failed (' + (state.reason || 'expired') + ') — open Remote Radios to re-pair';
     } else if (state.state === 'pass-ended') {
-      chip.textContent = '🎟 Guest Pass ended';
-      chip.style.background = '#e94560';
-      chip.style.color = '#fff';
-      chip.title = 'Guest Pass session ended (' + (state.reason || 'expired') + ') — back on the local rig';
+      const w = window.PassWording
+        ? PassWording.describe({ kind: 'pass-ended', reason: state.reason, owner: state.owner, endsAt: state.endsAt })
+        : { title: 'Guest Pass session ended', line: '', terminal: true };
+      chip.textContent = w.terminal ? '🎟 Guest Pass ended' : '🎟 Guest Pass · disconnected';
+      chip.style.background = w.terminal ? 'var(--accent-red)' : 'var(--warn)';
+      chip.style.color = w.terminal ? 'var(--on-accent-red)' : 'var(--bg-primary)';
+      chip.title = [w.title, w.line, 'Back on the local rig.'].filter(Boolean).join(' ');
     } else if (state.state === 'revoked') {
       chip.textContent = '🔗 pairing revoked';
       chip.style.background = '#e94560';
@@ -8499,6 +8718,19 @@ if (window.api && window.api.onRemoteClientDisplaced) {
     }
   };
   chip.addEventListener('click', _remoteRadiosOpen);
+  // Guest Pass: the owner took the radio back (pass-paused) or handed it
+  // back (pass-resumed). The guest keeps listening meanwhile (#541).
+  if (window.api && window.api.onRemotePassHold) {
+    window.api.onRemotePassHold((h) => {
+      _remotePassHeld = !!(h && h.paused);
+      if (_remotePassHeld && window.PassWording) _passBannerShow(PassWording.describe({ kind: 'paused', owner: h.owner }), null);
+      else _passBannerHide();
+      if (_lastChipState) setChip(_lastChipState);
+    });
+    window.api.onRemoteClientStatus && window.api.onRemoteClientStatus((st) => {
+      if (st && st.state !== 'connected' && _remotePassHeld) { _remotePassHeld = false; }
+    });
+  }
   if (window.api && window.api.onRemoteShackInfo) {
     const applyInfo = (info) => {
       remoteShack = info && info.remote ? info : { remote: false };
@@ -8516,9 +8748,18 @@ if (window.api && window.api.onRemoteClientDisplaced) {
     // Loud, app-wide notice when a Guest Pass session ends — the user may
     // be nowhere near the Remote Radios dialog when the clock runs out.
     window.api.onRemoteClientStatus((s) => {
-      if (s && s.state === 'pass-ended' && typeof showLogToast === 'function') {
+      if (s && s.state === 'pass-ended' && window.PassWording) {
+        const w = PassWording.describe({ kind: 'pass-ended', reason: s.reason, owner: s.owner, endsAt: s.endsAt });
+        _passBannerShow(w, w.terminal ? null : s.targetId);
+      } else if (s && s.state === 'pass-ended' && typeof showLogToast === 'function') {
         showLogToast('Guest Pass session ended (' + (s.reason || 'expired') + ') — switched back to your local rig.', { warn: true, duration: 8000 });
       }
+      // Guest Pass waiting (busy rig, Cloud check) or refused: say which (#541).
+      if (s && s.kind === 'pass' && window.PassWording && (s.state === 'waiting' || s.state === 'auth-fail')) {
+        const w = PassWording.describe({ kind: 'auth-fail', code: s.code, at: s.passAt, reason: s.passReason, by: s.by, owner: s.owner, endsAt: s.endsAt });
+        _passBannerShow(w, w.terminal ? null : s.targetId);
+      }
+      if (s && s.state === 'connected') _passBannerHide();
       if (s && s.state === 'revoked' && typeof showLogToast === 'function') {
         showLogToast('The shack operator revoked this desktop\'s pairing — switched back to your local rig.', { warn: true, duration: 8000 });
       }
@@ -10272,6 +10513,7 @@ async function runAdifImport(resultEl) {
       resultEl.textContent = '';
     } else if (result.success) {
       const parts = [`${result.imported.toLocaleString()} QSOs imported`];
+      if (result.updated > 0) parts.push(`${result.updated.toLocaleString()} updated with confirmations`);
       if (result.skipped > 0) parts.push(`${result.skipped.toLocaleString()} already in the log`);
       if (result.parksAdded > 0) {
         parts.push(`${result.parksAdded.toLocaleString()} new park ref${result.parksAdded === 1 ? '' : 's'}`);
@@ -10386,7 +10628,7 @@ hamlibTestBtn.addEventListener('click', async () => {
     const result = await window.api.testHamlib({ rigId, serialPort, baudRate, dtrOff });
     if (result.success) {
       const freqMHz = FreqDots.hzMhz(parseInt(result.frequency, 10)) || 'unknown';
-      hamlibTestResult.textContent = `Connected! Freq: ${freqMHz}` + rigTestSavedNote(serialPort);
+      hamlibTestResult.textContent = `Connected! Freq: ${freqMHz}` + rigTestSavedNote(serialPort) + rigTestWsjtxNote(result);
       hamlibTestResult.className = 'hamlib-test-success';
     } else {
       hamlibTestResult.textContent = `Failed: ${result.error}`;
@@ -10459,7 +10701,7 @@ serialcatTestBtn.addEventListener('click', async () => {
     const model = rigModelSelect ? rigModelSelect.value : '';
     const result = await window.api.testSerialCat({ portPath, baudRate, dtrOff, serialHandshake, model });
     if (result.success) {
-      serialcatTestResult.textContent = `Connected! Freq: ${FreqDots.mhzMhz(result.frequency) || result.frequency + ' MHz'}` + (result.note ? ` (${result.note})` : '') + rigTestSavedNote(portPath);
+      serialcatTestResult.textContent = `Connected! Freq: ${FreqDots.mhzMhz(result.frequency) || result.frequency + ' MHz'}` + (result.note ? ` (${result.note})` : '') + rigTestSavedNote(portPath) + rigTestWsjtxNote(result);
       serialcatTestResult.className = 'hamlib-test-success';
     } else {
       serialcatTestResult.textContent = `Failed: ${result.error}`;
@@ -10495,7 +10737,7 @@ document.getElementById('icom-test-btn').addEventListener('click', async () => {
   try {
     const result = await window.api.testIcomCiv({ portPath, baudRate, civAddress });
     if (result.success) {
-      resultEl.textContent = `Connected! Freq: ${FreqDots.mhzMhz(result.frequency) || result.frequency + ' MHz'}` + rigTestSavedNote(portPath);
+      resultEl.textContent = `Connected! Freq: ${FreqDots.mhzMhz(result.frequency) || result.frequency + ' MHz'}` + rigTestSavedNote(portPath) + rigTestWsjtxNote(result);
       resultEl.className = 'hamlib-test-success';
     } else {
       resultEl.textContent = `Failed: ${result.error}`;
@@ -10525,7 +10767,7 @@ document.getElementById('civ-tcp-test-btn')?.addEventListener('click', async () 
   try {
     const result = await window.api.testCivTcp({ host, port, civAddress });
     if (result.success) {
-      resultEl.textContent = `Connected! Freq: ${FreqDots.mhzMhz(result.frequency) || result.frequency + ' MHz'}`;
+      resultEl.textContent = `Connected! Freq: ${FreqDots.mhzMhz(result.frequency) || result.frequency + ' MHz'}` + rigTestWsjtxNote(result);
       resultEl.className = 'hamlib-test-success';
     } else {
       resultEl.textContent = `Failed: ${result.error}`;
@@ -10576,7 +10818,7 @@ document.getElementById('yaesu-lan-test-btn')?.addEventListener('click', async (
       const sid = r.sessionId != null ? ' Session 0x' + Number(r.sessionId).toString(16).toUpperCase().padStart(2, '0') + '.' : '';
       const radio = r.radio ? ' ' + r.radio + '.' : (r.id ? ' Radio ID ' + r.id + '.' : '');
       const freq = r.frequency ? ' Freq: ' + (FreqDots.mhzMhz(r.frequency) || r.frequency + ' MHz') + '.' : '';
-      resultEl.textContent = 'Logged in!' + sid + radio + freq + (r.note ? ' ' + r.note : '');
+      resultEl.textContent = 'Logged in!' + sid + radio + freq + (r.note ? ' ' + r.note : '') + rigTestWsjtxNote(r);
       resultEl.className = 'hamlib-test-success';
     } else {
       resultEl.textContent = 'Failed: ' + r.error;
@@ -10624,7 +10866,7 @@ document.getElementById('icom-network-test-btn')?.addEventListener('click', asyn
         ? ` (answered probe 0x${result.probedAddress.toString(16).toUpperCase().padStart(2, '0')})`
         : '';
       const radioName = result.radioName ? ` ${result.radioName}` : '';
-      resultEl.textContent = `Connected!${radioName} Freq: ${FreqDots.mhzMhz(result.frequency) || result.frequency + ' MHz'}${responseAddr}${probeAddr}`;
+      resultEl.textContent = `Connected!${radioName} Freq: ${FreqDots.mhzMhz(result.frequency) || result.frequency + ' MHz'}${responseAddr}${probeAddr}` + rigTestWsjtxNote(result);
       resultEl.className = 'hamlib-test-success';
     } else {
       resultEl.textContent = `Failed: ${result.error}`;
@@ -13269,7 +13511,7 @@ function openQuickLog() {
     callsign: tunedCall,
     freqKhz: radioFreqKhz || null,
     mode: radioMode || null,
-    power: radioPower || lastLogPower || null,
+    power: logFormPower(),
     ...programFill,
   });
 }
@@ -14812,7 +15054,7 @@ function renderDxccMatrix() {
   if (!dxccData || !dxccData.entities) {
     dxccMatrixBody.innerHTML = '';
     dxccPlaceholder.classList.remove('hidden');
-    dxccCountEl.textContent = '0 / 100';
+    dxccCountEl.textContent = window.DxccProgress.dxccProgressText(0, 'worked').count;
     dxccAwardLabelEl.textContent = '';
     dxccChallengeEl.classList.add('hidden');
     return;
@@ -14860,12 +15102,14 @@ function renderDxccMatrix() {
   }
 
   // Update progress counter
-  dxccCountEl.textContent = `${confirmedCount} / 100`;
-  dxccAwardLabelEl.textContent = confirmedCount >= 100 ? 'DXCC!' : '';
+  // #382: say what is counted, worked (ADIF) or confirmed (Log4OM SQLite).
+  const progress = window.DxccProgress.dxccProgressText(confirmedCount, dxccData.basis, challengeCount);
+  dxccCountEl.textContent = progress.count;
+  dxccAwardLabelEl.textContent = progress.award;
 
   // DXCC Challenge counter (All Bands view only)
   if (isAllBands) {
-    dxccChallengeEl.textContent = `Challenge: ${challengeCount}`;
+    dxccChallengeEl.textContent = progress.challenge;
     dxccChallengeEl.classList.remove('hidden');
   } else {
     dxccChallengeEl.classList.add('hidden');
@@ -15754,9 +15998,8 @@ function routeLogForSpot(spot) {
     callsign: spot.callsign || '',
     freqKhz: parseFloat(spot.frequency) || null,
     mode: spot.mode || null,
-    // Same precedence as the overlay: live CAT reading, then last entered,
-    // then the settings default.
-    power: radioPower > 0 ? radioPower : (lastLogPower > 0 ? lastLogPower : (defaultPower || null)),
+    // Same precedence as the overlay (logFormPower, #523).
+    power: logFormPower(),
     type,
     reference: p.refs[type] || '',
     parkName: p.names[type] || '',
@@ -15819,10 +16062,9 @@ function openLogPopup(spot) {
   logDate.value = now.toISOString().slice(0, 10);
   logTime.value = now.toISOString().slice(11, 16);
 
-  // Pre-fill power: prefer the live CAT reading (matches the TX Power slider),
-  // fall back to the user's last-entered value, then the settings default.
-  logPower.value = rigCurrentCaps.powerUnit === '%' ? ''
-    : radioPower > 0 ? radioPower : (lastLogPower > 0 ? lastLogPower : (defaultPower || 100));
+  // Pre-fill power: the radio's power as read or as POTACAT set it, then the
+  // operator's last entry, then their own Default TX Power, else empty (#523).
+  logPower.value = logFormPower() || '';
 
   // Pre-fill RST based on mode
   const isCwDigi = CW_DIGI_MODES_SET.has(mode);
@@ -16285,6 +16527,19 @@ logSaveBtn.addEventListener('click', async () => {
     logSaveBtn.textContent = origText;
   }
 });
+
+// #463: macOS refuses POTACAT the microphone, so the radio's audio is silent.
+// Main decides when to say it (lib/mac-mic-access.js) and clears it when
+// sound arrives; the sticky warn toast carries the theme's own colours.
+if (window.api.onMacMicNotice) {
+  window.api.onMacMicNotice((d) => {
+    const mine = document.querySelector('.log-toast.mac-mic');
+    if (!d || !d.show) { if (mine) mine.remove(); return; }
+    showLogToast(d.message, { warn: true, sticky: true });
+    const t = document.querySelector('.log-toast');
+    if (t) t.classList.add('mac-mic');
+  });
+}
 
 function showLogToast(message, opts) {
   const existing = document.querySelector('.log-toast');
@@ -17775,7 +18030,8 @@ async function openSettingsDialog(tab) {
   } else {
     setAdifLogPath.value = await window.api.getDefaultLogPath();
   }
-  setDefaultPower.value = s.defaultPower || 100;
+  // Blank = no default: an unknown power is logged empty (#523).
+  { const dp = LogTxPower.operatorDefaultPower(s); setDefaultPower.value = dp ? String(dp) : ''; }
   setSendToLogbook.checked = s.sendToLogbook === true;
   setLogbookType.value = s.logbookType || '';
   setLogbookHost.value = s.logbookHost || '127.0.0.1';
@@ -17951,6 +18207,7 @@ async function openSettingsDialog(tab) {
     }
     setWinlinkCap.value = s.winlinkSessionCapMin || 30;
     if (setWinlinkPrediction) setWinlinkPrediction.checked = s.winlinkPrediction !== false;
+    if (setWinlinkDeletedDays) setWinlinkDeletedDays.value = String([7, 30, 90, 0].includes(Number(s.winlinkDeletedDays)) && s.winlinkDeletedDays !== '' && s.winlinkDeletedDays != null ? Number(s.winlinkDeletedDays) : 30);
     if (setWinlinkAutoRetry) setWinlinkAutoRetry.checked = s.winlinkAutoRetry !== false;
     if (setWinlinkRecordAudio) setWinlinkRecordAudio.checked = !!s.winlinkRecordModemAudio;
     setWinlinkPatPath.value = s.winlinkPatPath || '';
@@ -18609,7 +18866,7 @@ settingsSave.addEventListener('click', async () => {
   const loggingEnabled = true; // always on; cloud sync is the choice
   const n1mmRstEnabled = setN1mmRst.checked;
   const adifLogPath = setAdifLogPath.value.trim() || '';
-  const defaultPowerVal = parseInt(setDefaultPower.value, 10) || 100;
+  const defaultPowerVal = LogTxPower.positiveWatts(setDefaultPower.value.trim()); // 0 = none (#523)
   const sendToLogbook = setSendToLogbook.checked;
   const logCommentTagsEnabled = setLogCommentTags ? setLogCommentTags.checked : true;
   const logbookTypeVal = setLogbookType.value;
@@ -18790,7 +19047,8 @@ settingsSave.addEventListener('click', async () => {
     logCommentTags: logCommentTagsEnabled,
     jtcatLogComment: setJtcatLogComment ? setJtcatLogComment.checked : true,
     adifLogPath: adifLogPath,
-    defaultPower: defaultPowerVal,
+    defaultPower: defaultPowerVal || null,
+    defaultPowerSet: defaultPowerVal > 0, // a typed 100 is the operator's, not the old untouched default
     sendToLogbook: sendToLogbook,
     logbookType: logbookTypeVal,
     logbookHost: logbookHostVal,
@@ -18854,6 +19112,7 @@ settingsSave.addEventListener('click', async () => {
       } : {}),
       winlinkSessionCapMin: Math.max(10, Math.min(60, parseInt(setWinlinkCap.value, 10) || 30)),
       winlinkPrediction: setWinlinkPrediction ? setWinlinkPrediction.checked : true,
+      ...(setWinlinkDeletedDays ? { winlinkDeletedDays: Number(setWinlinkDeletedDays.value) } : {}),
       winlinkAutoRetry: setWinlinkAutoRetry ? setWinlinkAutoRetry.checked : true,
       winlinkRecordModemAudio: setWinlinkRecordAudio ? setWinlinkRecordAudio.checked : false,
       winlinkPatPath: setWinlinkPatPath.value.trim(),
@@ -19095,12 +19354,15 @@ window.api.onCatStatus(({ connected, error, wsjtxMode, noCat }) => {
     syncActivatorCatPill('status', noCatTitle);
     return;
   }
-  if (wsjtxMode) {
+  if (wsjtxMode || (enableWsjtx && !connected)) {
+    // WSJT-X Mode: POTACAT has no radio link. Neutral "CAT: off", never green
+    // (it read green with WSJT-X not even running; #547).
     if (catDisconnectTimer) { clearTimeout(catDisconnectTimer); catDisconnectTimer = null; }
+    const offTitle = (typeof WsjtxModeNotice !== 'undefined') ? WsjtxModeNotice.catPill().title : 'WSJT-X Mode is on: WSJT-X has the radio';
     catStatusEl.textContent = catPillLabel();
-    catStatusEl.className = 'status connected';
-    catStatusEl.title = 'Radio controlled by WSJT-X';
-    syncActivatorCatPill('status connected', 'Radio controlled by WSJT-X');
+    catStatusEl.className = 'status wsjtx-off';
+    catStatusEl.title = offTitle;
+    syncActivatorCatPill('status wsjtx-off', offTitle);
     return;
   }
   if (connected) {
@@ -22020,17 +22282,16 @@ window.api.onClusterStatus((s) => {
 });
 
 // --- WSJT-X listeners ---
-window.api.onWsjtxStatus(({ connected }) => {
-  wsjtxStatusEl.textContent = 'WSJT-X';
-  wsjtxStatusEl.className = 'status ' + (connected ? 'connected' : 'disconnected');
-  if (enableWsjtx) wsjtxStatusEl.classList.remove('hidden');
+window.api.onWsjtxStatus(({ connected, heard }) => {
   if (!connected) {
     wsjtxDecodes = [];
     wsjtxState = null;
   }
-  // Tracked for the CAT popover's "WSJT-X enabled but not heartbeating" hint.
   wsjtxConnected = !!connected;
-  if (catPopoverOpen) updateCatPopoverWsjtxWarning();
+  // "Heard" (a Heartbeat/Status in the last 60 s) is main's decision (#547).
+  wsjtxHeard = !!heard;
+  if (wsjtxHeard) wsjtxEverHeard = true;
+  updateWsjtxStatusVisibility();
 });
 
 window.api.onWsjtxState((state) => {
@@ -22161,7 +22422,18 @@ window.api.onCatMode((mode) => {
 });
 
 let radioPower = 0; // last known TX power from CAT (watts)
+let rigKnownPower = 0; // main's rig-state txPower: read from the radio or last set by POTACAT, 0 = unknown
 let lastLogPower = 0; // last power value entered by user in log dialog (sticky)
+// The power a log form starts with, or null for an empty box: never a
+// guessed 100 W (#523, lib/log-tx-power.js).
+function logFormPower() {
+  if (rigCurrentCaps.powerUnit === '%') return null;
+  return LogTxPower.txPowerForLog({
+    knownW: rigKnownPower > 0 ? rigKnownPower : radioPower, // main's level is the newer (a set lands there first)
+    enteredW: lastLogPower,
+    defaultW: defaultPower,
+  });
+}
 window.api.onCatPower((watts) => {
   radioPower = watts;
   // Feed the TX-but-no-RF detector: any non-zero power within the arm window
@@ -22454,14 +22726,14 @@ catLogClearBtn.addEventListener('click', () => {
     // Two settings silently stop POTACAT touching the local radio, and neither
     // was in this report — so a log with no CAT lines at all was unreadable
     // (KK4UDJ 2026-09-03). Operating a remote shack skips the local connect by
-    // design; WSJT-X integration hands the radio over on purpose.
+    // design; WSJT-X Mode hands the radio over on purpose.
     const remoteTarget = s.activeTargetId &&
       (s.connectionTargets || []).find((t) => t && t.id === s.activeTargetId);
     const radioOwner = remoteTarget
       ? 'REMOTE SHACK — ' + (remoteTarget.name ? maskReportText(remoteTarget.name)
         : remoteTarget.host ? maskHost(remoteTarget.host) : 'unnamed target') +
         ' (the local rig is deliberately not connected)'
-      : s.enableWsjtx ? 'WSJT-X integration is ON (POTACAT releases the radio to WSJT-X)'
+      : s.enableWsjtx ? 'WSJT-X (WSJT-X Mode is on; see the first line)'
       : 'this station';
     const enabled = [
       s.enablePota && 'POTA', s.enableSota && 'SOTA', s.enableWwff && 'WWFF', s.enableLlota && 'LLOTA', s.enableWwbota && 'WWBOTA',
@@ -22515,12 +22787,16 @@ catLogClearBtn.addEventListener('click', () => {
     try { if (window.api.launcherDiag) launcherLine = await window.api.launcherDiag(); } catch {}
     let settingsSaved = '(unknown)';
     try { if (window.api.settingsSaveStatus) settingsSaved = await window.api.settingsSaveStatus(); } catch {}
+    // WSJT-X Mode leads the header (#547): it explains a log with no CAT lines.
+    const wsjtxModeLine = (window.WsjtxModeNotice && s.enableWsjtx)
+      ? window.WsjtxModeNotice.reportLine({ mode: true, heard: wsjtxHeard, port: s.wsjtxPort }) : '';
     const md = {
       version: window._appVersion || s.appVersion || 'unknown',
       platform: window.api.platform,
       rig: rigDesc,
       callsign: (s.myCallsign || '(not set)').toUpperCase(),
       radioOwner,
+      wsjtxMode: wsjtxModeLine,
       features: enabled,
       setupNotes,
       stationSetup,
@@ -22528,6 +22804,7 @@ catLogClearBtn.addEventListener('click', () => {
       winlink: winlinkLine,
       launcher: launcherLine,
       settingsSaved,
+      micAccess: '',
     };
     // Complete-from-launch log: main reads startup.log + session.log (both
     // capture everything since process start, including the pre-window lines
@@ -22550,6 +22827,7 @@ catLogClearBtn.addEventListener('click', () => {
         }
         body.push(...(pkg.tail || []));
         logSections = [];
+        if (pkg.micAccess) md.micAccess = pkg.micAccess; // #463
         // The crashed run goes FIRST — it is the reason the report exists,
         // and a reader who stops after one code block should still see it.
         if (pkg.prevRunUnclean) {
@@ -22601,6 +22879,7 @@ catLogClearBtn.addEventListener('click', () => {
     return [
       '## POTACAT Bug Report',
       '',
+      ...(md.wsjtxMode ? [md.wsjtxMode] : []),
       '**Version:** v' + md.version,
       '**Platform:** ' + md.platform,
       '**Rig:** ' + md.rig,
@@ -22613,6 +22892,7 @@ catLogClearBtn.addEventListener('click', () => {
       ...(md.winlink ? ['**Winlink:** ' + md.winlink] : []),
       ...(md.launcher ? ['**Launcher:** ' + md.launcher] : []),
       '**Settings saved:** ' + md.settingsSaved,
+      ...(md.micAccess ? ['**macOS microphone access:** ' + md.micAccess] : []),
       '',
       '### What I tried to do',
       '<!-- fill in: the steps you took -->',
@@ -25142,7 +25422,8 @@ function rigApplyCapabilities(caps) {
   if (activatorAtuBtn) activatorAtuBtn.style.display = caps.atu ? '' : 'none';
   rigNbBtn.style.display = caps.nb ? '' : 'none';
   if (rigWnbBtn) rigWnbBtn.style.display = caps.wnb ? '' : 'none';
-  rigPowerOnBtn.style.display = caps.power ? '' : 'none';
+  // #485: powerOn false = the radio switches off over CAT but not on (FTX-1).
+  rigPowerOnBtn.style.display = caps.power && caps.powerOn !== false ? '' : 'none';
   rigPowerOffBtn.style.display = caps.power ? '' : 'none';
   rigRfGain.closest('.rig-popover-row').style.display = caps.rfgain ? '' : 'none';
   // Radio-native RF gain steps (Flex): swap the 0-100 slider for a dB select
@@ -25665,6 +25946,7 @@ window.api.onRigState((state) => {
     rigRfGain.value = state.rfGain;
     rigRfGainLabel.textContent = state.rfGain;
   }
+  if (state.txPower != null) rigKnownPower = Number(state.txPower) > 0 ? Number(state.txPower) : 0;
   if (state.txPower != null && document.activeElement !== rigTxPower && document.activeElement !== rigTxPowerSelect) {
     if (rigUsesPowerSelect() && rigTxPowerSelect) {
       const choices = Array.from(rigTxPowerSelect.options).map(o => parseFloat(o.value));
@@ -27825,6 +28107,7 @@ function resumeActivation(activation) {
   activatorParkRefs = mainRefs.map(r => ({ ref: r.ref, name: '', program: (r.sig || 'POTA').toUpperCase() }));
   activatorCrossRefs = crossRefs.map(r => ({ program: (r.sig || '').toUpperCase(), ref: r.ref }));
   hunterParkRefs = [];
+  hunterParkCall = '';
   activatorParkRefInput.value = mainRefs.map(r => r.ref).join(',');
   activatorParkNameEl.textContent = '';
   updateParkExtraBadge();
@@ -29044,10 +29327,15 @@ if (window.api.onEchocatAppConnected) window.api.onEchocatAppConnected(() => {
 /** Update hunter park input display and extra badge */
 function updateHunterParkDisplay() {
   const input = document.getElementById('activator-hunter-park');
-  const badge = document.getElementById('activator-hunter-park-extra');
   if (input) {
     input.value = hunterParkRefs[0]?.ref || '';
   }
+  updateHunterParkBadge();
+}
+
+/** The "+N" badge alone: the parks behind it are hunterParkRefs.slice(1). */
+function updateHunterParkBadge() {
+  const badge = document.getElementById('activator-hunter-park-extra');
   if (!badge) return;
   const extra = hunterParkRefs.length - 1;
   if (extra > 0) {
@@ -29155,27 +29443,27 @@ function activatorReadEntry() {
   // Their park(s) as typed. A comma list is an n-fer (WD3D 2026-10-26: "US-1234,
   // US-5678" for a 2-fer logged NO park, silently — the box only ever read one
   // reference). A reference that is not one is refused, never dropped.
+  // What the box shows is what is logged (#506): a reference typed over an
+  // old one replaces it, an empty box logs no park, and only the parks
+  // behind a visible +N badge (multi-park dialog, n-fer spot) are added.
   const hunterInput = document.getElementById('activator-hunter-park');
-  if (hunterInput && hunterInput.value.trim()) {
-    const parsed = parseHunterParkInput(hunterInput.value);
-    if (parsed.bad.length) {
+  if (hunterInput) {
+    const hunterBadge = document.getElementById('activator-hunter-park-extra');
+    const resolved = P2pParkEntry.resolveHunterParks({
+      text: hunterInput.value,
+      stored: hunterParkRefs,
+      badgeShown: !!(hunterBadge && !hunterBadge.classList.contains('hidden')),
+      max: MAX_N_FER,
+      inferProgram: inferParkProgram,
+    });
+    if (resolved.bad.length) {
       hunterInput.style.outline = '1px solid #e94560';
       hunterInput.focus();
-      showLogToast(`Not logged: "${parsed.bad[0]}" is not a park or summit reference. Separate their parks with commas, e.g. US-1234, US-5678.`, { warn: true, duration: 7000 });
+      showLogToast(`Not logged: "${resolved.bad[0]}" is not a park or summit reference. Separate their parks with commas, e.g. US-1234, US-5678.`, { warn: true, duration: 7000 });
       return;
     }
     hunterInput.style.outline = '';
-    if (parsed.refs.length > 1 || hunterParkRefs.length === 0) {
-      // The typed list, plus anything behind the +N badge, names kept.
-      const known = new Map(hunterParkRefs.map(p => [p.ref, p]));
-      const merged = [];
-      for (const ref of [...parsed.refs, ...hunterParkRefs.slice(1).map(p => p.ref)]) {
-        if (merged.some(p => p.ref === ref) || merged.length >= MAX_N_FER) continue;
-        const k = known.get(ref);
-        merged.push({ ref, name: (k && k.name) || '', program: (k && k.program) || inferParkProgram(ref) });
-      }
-      hunterParkRefs = merged;
-    }
+    hunterParkRefs = resolved.refs;
   }
   if (!primaryParkRef()) {
     activatorParkRefInput.focus();
@@ -29342,6 +29630,7 @@ function clearActivatorEntry() {
   if (activatorStateInput) activatorStateInput.value = '';
   resetActivatorRst();
   hunterParkRefs = [];
+  hunterParkCall = '';
   updateHunterParkDisplay();
   activatorCallsignInput.focus();
 }
@@ -29956,6 +30245,7 @@ function fillActivatorFromSpot(s) {
   // "Right now it will only populate 1 park in the P2P log entry" — the
   // operator had to type the second park by hand to get both credits.
   hunterParkRefs = hunterParkRefsFromSpot(s);
+  hunterParkCall = P2pParkEntry.normCall(s.callsign); // the spot's park is that station's (#506)
   updateHunterParkDisplay();
   resetActivatorRst();
   // QRZ lookup for op name and state
@@ -30119,6 +30409,15 @@ let activatorQrzTimeout = null;
 if (activatorCallsignInput) {
   activatorCallsignInput.addEventListener('input', () => {
     clearTimeout(activatorQrzTimeout);
+    // A different station clears their park (#506): an abandoned P2P's park
+    // must not ride along onto the next caller's contact.
+    const own = P2pParkEntry.parkCallAfterEdit(hunterParkCall, activatorCallsignInput.value);
+    hunterParkCall = own.parkCall;
+    const hunterBox = document.getElementById('activator-hunter-park');
+    if (own.clear && (hunterParkRefs.length || (hunterBox && hunterBox.value.trim()))) {
+      hunterParkRefs = [];
+      updateHunterParkDisplay();
+    }
     const val = activatorCallsignInput.value.trim().toUpperCase();
     if (val.length < 3) {
       activatorOpNameEl.textContent = '';
@@ -30310,6 +30609,7 @@ if (multiparkOkBtn) {
       // through the +N badge fell through to 'POTA' at log time and credited
       // the other operator's P2P to the wrong program.
       hunterParkRefs = refs.map(r => ({ ...r, program: r.program || inferParkProgram(r.ref) }));
+      hunterParkCall = P2pParkEntry.normCall(activatorCallsignInput.value);
       updateHunterParkDisplay();
     }
     multiparkDialog.close();
@@ -30338,15 +30638,7 @@ if (hunterParkExtraBadge) {
  *  and WWBOTA bunkers (B/US-1234); the program is tagged from the shape so the
  *  ADIF SIG is right (summit-to-park typed by hand used to log SIG=POTA).
  *  @returns {{refs: string[], bad: string[]}} */
-function parseHunterParkInput(text) {
-  const refs = [], bad = [];
-  for (const tok of String(text || '').toUpperCase().split(/[,;\s]+/).filter(Boolean)) {
-    const ok = /^[A-Z]{1,4}-\d{3,5}$/.test(tok) || /^[A-Z0-9]{1,4}\/[A-Z]{2}-\d{3}$/.test(tok) || /^B\/[A-Z]{1,3}-\d{3,5}$/.test(tok);
-    if (!ok) bad.push(tok);
-    else if (!refs.includes(tok)) refs.push(tok);
-  }
-  return { refs, bad };
-}
+const parseHunterParkInput = P2pParkEntry.parseHunterParkInput; // lib/p2p-park-entry.js
 
 // --- Hunter Park Autocomplete ---
 const hunterParkInput = document.getElementById('activator-hunter-park');
@@ -30357,12 +30649,14 @@ if (hunterParkInput) {
   hunterParkInput.addEventListener('input', () => {
     clearTimeout(hunterParkSearchTimeout);
     hunterParkInput.style.outline = '';
+    // A park typed now is for whoever is in the callsign box (#506).
+    hunterParkCall = P2pParkEntry.normCall(activatorCallsignInput.value);
     // In a comma list, search for the reference being typed (the last one).
     const full = hunterParkInput.value;
     const cut = full.lastIndexOf(',');
     const head = cut >= 0 ? full.slice(0, cut + 1) + ' ' : '';
     const query = (cut >= 0 ? full.slice(cut + 1) : full).trim();
-    if (query.length < 2) { hunterParkDropdown.classList.add('hidden'); if (cut < 0) hunterParkRefs = []; return; }
+    if (query.length < 2) { hunterParkDropdown.classList.add('hidden'); if (cut < 0) { hunterParkRefs = []; updateHunterParkBadge(); } return; }
     hunterParkSearchTimeout = setTimeout(async () => {
       const results = await window.api.searchParks(query);
       if (!results || !results.length) { hunterParkDropdown.classList.add('hidden'); return; }
@@ -30718,6 +31012,7 @@ async function _buildJtcatCapture(ctx) {
       });
       workletNode.port.onmessage = function(e) {
         if (_jtcatStallWatch) _jtcatStallWatch.noteSamples(e.data, Date.now());
+        jtcatMicNote(e.data);
         window.api.jtcatAudio(e.data);
       };
       jtcatRxGainNode.connect(workletNode);
@@ -30774,6 +31069,7 @@ async function _buildJtcatCapture(ctx) {
             samples = Array.from(rawSamples);
           }
           if (_jtcatStallWatch) _jtcatStallWatch.noteSamples(samples, Date.now());
+          jtcatMicNote(samples);
           window.api.jtcatAudio(samples);
         } catch (err) {
           console.error('[JTCAT] Audio processor error:', err.message || err);
@@ -30998,8 +31294,22 @@ window.api.onJtcatSetTxGain(function(level) {
 // does not.
 var _jtcatStallWatch = null;
 var _jtcatStallTimer = null;
+// #463: on a Mac that refuses the microphone, the input is exact zeros from
+// the first buffer (lib/mac-mic-access.js; main decides what to say).
+var _jtcatMicWatch = null;
+function jtcatMicNote(samples) {
+  if (!_jtcatMicWatch) return;
+  var now = Date.now();
+  var ev = _jtcatMicWatch.note(samples, now);
+  if (ev && window.api.macMicSilence) window.api.macMicSilence({ surface: 'jtcat', silent: ev === 'silent', silentMs: _jtcatMicWatch.silentFor(now) });
+}
 function jtcatArmStallWatch(track) {
   var now = Date.now();
+  if (window.MacMicAccess && window.api.platform === 'darwin') {
+    if (_jtcatMicWatch) _jtcatMicWatch.started(now);
+    else _jtcatMicWatch = new window.MacMicAccess.SilenceWatch(now);
+    if (window.api.macMicCaptureStart) window.api.macMicCaptureStart('jtcat').catch(function() {});
+  }
   if (_jtcatStallWatch) _jtcatStallWatch.started(now);
   else _jtcatStallWatch = new window.CaptureStall.CaptureStallWatch(now);
   if (_jtcatStallTimer) clearInterval(_jtcatStallTimer);
