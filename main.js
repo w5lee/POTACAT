@@ -30996,6 +30996,7 @@ function sendVfoState() {
     freq: displayFreqHz() || 0,
     mode: _currentMode || '',
     filterWidth: _currentFilterWidth || 0,
+    tciSquelch: tciRigTarget() && tciTestRadio?.squelchAvailable ? _currentSquelch : null,
     nb: _currentNbState,
     atu: _currentAtuState,
     txPower: _currentTxPower,   // lets the popout snapshot power into a VFO profile
