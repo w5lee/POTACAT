@@ -20330,6 +20330,7 @@ function connectTciTestRadio() {
     onLink(connected) {
       if (tciTestRadio !== radio) return;
       if (!connected) {
+        tciSpecRing.clear();
         tciTestRadio = null;
         tciDriveKnown = false;
         tciManualForward = null;
@@ -20352,6 +20353,7 @@ function connectTciTestRadio() {
     },
     onAudio(pcm) {
       if (tciTestRadio !== radio) return;
+      if (_mobileWantsSpectrum && usesTciEchoAudio()) tciSpecRing.push(pcm, TCI_RX_RATE);
       // EchoCAT already accepts PCM from network radios on this bridge.
       if (tciEchoAudioConnected && remoteAudioWin && !remoteAudioWin.isDestroyed()) {
         audioSafeSend(remoteAudioWin.webContents, 'smartsdr-audio-frame', { pcm, sampleRate: TCI_RX_RATE });
@@ -20479,6 +20481,7 @@ function closeTciTestRadio() {
   tciTestRadio = null;
   tciDriveKnown = false;
   tciManualForward = null;
+  if (radio) tciSpecRing.clear();
   radio?.close();
   if (radio?.transmitting) _broadcastEffectiveTxState();
 }
@@ -22068,13 +22071,14 @@ function applyFlexReadback(patch) {
   if (changed) broadcastRigState();
 }
 const rxSpecRing = new RxSpectrumRing();
+const tciSpecRing = new RxSpectrumRing();
 let _rxSpecBridgeOn = false;
 function rxSpectrumEngineLive() {
   return !!((jtcatManager && jtcatManager.running) || (ft8Engine && ft8Engine._running));
 }
 /** Sound-card radios: the audio window captures the rig input for the spectrum. */
 function rxSpectrumSync() {
-  const socketAudio = settings.audioSource === 'smartsdr' || settings.audioSource === 'icom-network';
+  const socketAudio = usesTciEchoAudio() || settings.audioSource === 'smartsdr' || settings.audioSource === 'icom-network';
   const want = !!(_mobileWantsSpectrum && remoteServer && remoteServer.hasClient()
     && !rxSpectrumEngineLive() && !socketAudio && settings.remoteAudioInput);
   if (want === _rxSpecBridgeOn) return;
@@ -22172,7 +22176,13 @@ function startInProcessSpectrum() {
     // behaviour and stays the last resort.
     const specBuf = ft8Engine && (ft8Engine._audioBuffer || ft8Engine._specBuffer);
     let buf, off, source;
-    if (specBuf && rxSpectrumEngineLive()) {
+    if (usesTciEchoAudio() && !sdrHoldsDial()) {
+      // TCI supplies RX audio even with the desktop decoder and phone audio off.
+      if (!tciSpecRing.fresh()) return;
+      buf = tciSpecRing.buffer;
+      off = tciSpecRing.offset;
+      source = rxSpectrumEngineLive() ? 'engine' : 'rx';
+    } else if (specBuf && rxSpectrumEngineLive()) {
       buf = specBuf; off = (ft8Engine._audioBuffer ? ft8Engine._audioOffset : ft8Engine._specOffset) || 0; source = 'engine';
     } else if (rxSpecRing.fresh()) {
       buf = rxSpecRing.buffer; off = rxSpecRing.offset; source = 'rx';
@@ -22191,6 +22201,7 @@ function startInProcessSpectrum() {
 }
 
 function stopInProcessSpectrum() {
+  tciSpecRing.clear();
   if (_rxSpecBridgeOn) { _rxSpecBridgeOn = false; if (remoteAudioWin && !remoteAudioWin.isDestroyed()) remoteAudioWin.webContents.send('rx-spectrum-want', { on: false }); }
   _releaseSpectrumPowerSave();
   if (!_spectrumTimer) return;
