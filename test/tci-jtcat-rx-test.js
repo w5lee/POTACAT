@@ -185,7 +185,7 @@ function txChrono(count) {
   return frame;
 }
 
-async function withMockTxServer(run, { samples = Float32Array.of(0.25, -0.25), voice = false, thetis = false, emulateExpertSdr = false } = {}) {
+async function withMockTxServer(run, { samples = Float32Array.of(0.25, -0.25), voice = false, thetis = false, emulateExpertSdr = false, onDigitalTxAudio } = {}) {
   const server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
   await once(server, 'listening');
   let finish;
@@ -199,6 +199,7 @@ async function withMockTxServer(run, { samples = Float32Array.of(0.25, -0.25), v
   let afterDial;
   const client = connectTciJtcatRx(server.address().port, {
     server: emulateExpertSdr ? 'thetis' : undefined,
+    onDigitalTxAudio,
     onAudio() {}, onDial(hz) { afterDial?.(hz); }, onMode() {}, onSmeter() {}, onTxMeter() {}, log() {},
   });
   try {
@@ -231,6 +232,7 @@ async function withMockTxServer(run, { samples = Float32Array.of(0.25, -0.25), v
 }
 
 test('keys for TCI audio, responds to TX_CHRONO, and releases after the tail', { timeout: 3000 }, async () => {
+  const txFrames = [];
   await withMockTxServer(async ({ peer, completed, readMeasuredWatts }) => {
     const next = once(peer, 'message');
     peer.send('tx_power:99;');
@@ -241,6 +243,8 @@ test('keys for TCI audio, responds to TX_CHRONO, and releases after the tail', {
     assert.equal(audio.readUInt32LE(24), 2);
     assert.equal(audio.readUInt32LE(20), 3);
     assert.deepEqual([audio.readFloatLE(64), audio.readFloatLE(68), audio.readFloatLE(72)], [0.25, -0.25, 0]);
+    assert.equal(txFrames.length, 1);
+    assert.deepEqual(txFrames[0], audio.subarray(64));
     peer.send('tx_power:4.4;');
     peer.send('tx_power:3.2;');
     const release = once(peer, 'message');
@@ -248,7 +252,7 @@ test('keys for TCI audio, responds to TX_CHRONO, and releases after the tail', {
     assert.equal(readMeasuredWatts(), 4.4);
     assert.equal((await release)[0].toString(), 'trx:0,false;');
     peer.send('trx:0,false;');
-  });
+  }, { onDigitalTxAudio: (payload) => txFrames.push(payload) });
 });
 
 test('a lost TX socket opens a recovery connection and releases PTT', { timeout: 3000 }, async () => {

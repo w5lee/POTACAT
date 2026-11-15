@@ -20331,6 +20331,7 @@ function connectTciTestRadio() {
       if (tciTestRadio !== radio) return;
       if (!connected) {
         tciSpecRing.clear();
+        tciTxSpecRing.clear();
         tciTestRadio = null;
         tciDriveKnown = false;
         tciManualForward = null;
@@ -20348,6 +20349,8 @@ function connectTciTestRadio() {
     },
     onTxState(transmitting) {
       if (tciTestRadio !== radio) return;
+      tciTxSpecRing.clear();
+      tciSpecRing.clear();
       if (transmitting) tciManualForward = null;
       if (usesTciEchoAudio()) _broadcastEffectiveTxState();
     },
@@ -20363,6 +20366,12 @@ function connectTciTestRadio() {
         audioSafeSend(jtcatPopoutWin.webContents, 'jtcat-vita49-audio', { pcm, sampleRate: TCI_RX_RATE });
       }
       jtcatManager.feedAudio('default', pcm);
+    },
+    onDigitalTxAudio(payload) {
+      if (tciTestRadio !== radio || !_mobileWantsSpectrum || !usesTciEchoAudio()) return;
+      const pcm = new Float32Array(payload.length / 4);
+      for (let i = 0; i < pcm.length; i++) pcm[i] = payload.readFloatLE(i * 4);
+      tciTxSpecRing.push(pcm, TCI_RX_RATE);
     },
     // Broadcast confirmed radio state through the same display paths as CAT.
     onRxPeak(level) {
@@ -20481,7 +20490,10 @@ function closeTciTestRadio() {
   tciTestRadio = null;
   tciDriveKnown = false;
   tciManualForward = null;
-  if (radio) tciSpecRing.clear();
+  if (radio) {
+    tciSpecRing.clear();
+    tciTxSpecRing.clear();
+  }
   radio?.close();
   if (radio?.transmitting) _broadcastEffectiveTxState();
 }
@@ -22072,6 +22084,7 @@ function applyFlexReadback(patch) {
 }
 const rxSpecRing = new RxSpectrumRing();
 const tciSpecRing = new RxSpectrumRing();
+const tciTxSpecRing = new RxSpectrumRing();
 let _rxSpecBridgeOn = false;
 function rxSpectrumEngineLive() {
   return !!((jtcatManager && jtcatManager.running) || (ft8Engine && ft8Engine._running));
@@ -22178,10 +22191,12 @@ function startInProcessSpectrum() {
     let buf, off, source;
     if (usesTciEchoAudio() && !sdrHoldsDial()) {
       // TCI supplies RX audio even with the desktop decoder and phone audio off.
-      if (!tciSpecRing.fresh()) return;
-      buf = tciSpecRing.buffer;
-      off = tciSpecRing.offset;
-      source = rxSpectrumEngineLive() ? 'engine' : 'rx';
+      const transmitting = tciTestRadio?.transmitting === true;
+      const ring = transmitting ? tciTxSpecRing : tciSpecRing;
+      if (!ring.fresh()) return;
+      buf = ring.buffer;
+      off = ring.offset;
+      source = transmitting || rxSpectrumEngineLive() ? 'engine' : 'rx';
     } else if (specBuf && rxSpectrumEngineLive()) {
       buf = specBuf; off = (ft8Engine._audioBuffer ? ft8Engine._audioOffset : ft8Engine._specOffset) || 0; source = 'engine';
     } else if (rxSpecRing.fresh()) {
@@ -22202,6 +22217,7 @@ function startInProcessSpectrum() {
 
 function stopInProcessSpectrum() {
   tciSpecRing.clear();
+  tciTxSpecRing.clear();
   if (_rxSpecBridgeOn) { _rxSpecBridgeOn = false; if (remoteAudioWin && !remoteAudioWin.isDestroyed()) remoteAudioWin.webContents.send('rx-spectrum-want', { on: false }); }
   _releaseSpectrumPowerSave();
   if (!_spectrumTimer) return;

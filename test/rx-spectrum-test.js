@@ -61,7 +61,9 @@ check('TCI feeds the phone waterfall before the desktop engine gate', () => {
   const callback = main.slice(main.indexOf('    onAudio(pcm) {'), main.indexOf('    // Broadcast confirmed radio state'));
   assert.match(callback, /if \(_mobileWantsSpectrum && usesTciEchoAudio\(\)\) tciSpecRing\.push\(pcm, TCI_RX_RATE\);[\s\S]*if \(!jtcatManager/);
   const loop = main.slice(main.indexOf('function startInProcessSpectrum('), main.indexOf('function stopInProcessSpectrum('));
-  assert.match(loop, /if \(usesTciEchoAudio\(\) && !sdrHoldsDial\(\)\) \{\s*(?:\/\/[^\n]*\n\s*)?if \(!tciSpecRing\.fresh\(\)\) return;\s*buf = tciSpecRing\.buffer;/);
+  assert.match(loop, /if \(usesTciEchoAudio\(\) && !sdrHoldsDial\(\)\)/);
+  assert.match(loop, /const ring = transmitting \? tciTxSpecRing : tciSpecRing;\s*if \(!ring\.fresh\(\)\) return;/);
+  assert.match(callback, /onDigitalTxAudio\(payload\)[\s\S]*tciTxSpecRing\.push\(pcm, TCI_RX_RATE\);/);
   assert.match(main, /const socketAudio = usesTciEchoAudio\(\) \|\|/);
 });
 check('the engine wins while it runs; the RX ring otherwise; frames say which', () => {
