@@ -1863,7 +1863,10 @@
           // jtcat-qso-logged: this page says which parks a JTCAT contact was
           // logged at when some were read from the activator's spot comment.
           // mail-folders-v2: this page shows the Deleted folder (#475), so the shack may push it.
-          capabilities: ['chunked-all-qsos', 'qso-delta', 'chunked-worked-qsos', 'local-cw-sidetone', 'jtcat-qso-logged', 'mail-folders-v2'],
+          // pass-state: on a Guest Pass, the shack sends pass-state {state,
+          // reason, ...} and lets a second device of the same guest wait
+          // instead of taking the radio (#541 step 2).
+          capabilities: ['chunked-all-qsos', 'qso-delta', 'chunked-worked-qsos', 'local-cw-sidetone', 'jtcat-qso-logged', 'mail-folders-v2', 'pass-state'],
         }));
       } catch {}
       onOpen();
@@ -2173,7 +2176,9 @@
         // a Guest Pass with Cloud, or the pass has not started: the pass is
         // fine, so say which and ask again on a timer. Never "revoked" (#541).
         if (window.PassWording && PassWording.isRetryableAuthFail(msg.code, msg.passReason)) {
-          var waitWords = PassWording.describe({ kind: 'auth-fail', code: msg.code, by: msg.by, reason: msg.passReason, at: msg.passAt, owner: passOwnerCall() });
+          var waitWords = (msg.passState && PassWording.describeState)
+            ? PassWording.describeState(msg.passState, { owner: passOwnerCall() })
+            : PassWording.describe({ kind: 'auth-fail', code: msg.code, by: msg.by, reason: msg.passReason, at: msg.passAt, owner: passOwnerCall() });
           var waitText = [waitWords.title, waitWords.line].filter(Boolean).join(' ');
           var waitMs = PassWording.retryDelayMs(msg.code, passAuthRetries, { reason: msg.passReason, at: msg.passAt });
           passAuthRetries++;
@@ -2197,7 +2202,9 @@
           break;
         }
         if (msg.code === 'pass_not_valid' && window.PassWording) {
-          var overWords = PassWording.describe({ kind: 'auth-fail', code: msg.code, reason: msg.passReason, at: msg.passAt, owner: passOwnerCall() });
+          var overWords = (msg.passState && PassWording.describeState)
+            ? PassWording.describeState(msg.passState, { owner: passOwnerCall() })
+            : PassWording.describe({ kind: 'auth-fail', code: msg.code, reason: msg.passReason, at: msg.passAt, owner: passOwnerCall() });
           connectError.textContent = [overWords.title, overWords.line].filter(Boolean).join(' ');
         } else {
           connectError.textContent = msg.reason || 'Authentication failed';
@@ -2239,6 +2246,11 @@
 
       case 'pass-resumed':
         renderPassHold(false);
+        break;
+
+      case 'pass-state':
+        // The guest's state and why (#541 step 2), in the shared words.
+        renderPassState(msg);
         break;
 
       case 'audio-devices':
@@ -6559,6 +6571,40 @@
     el.classList.add('pass-held');
     el.classList.remove('hidden');
   }
+  // The station's pass-state (#541 step 2): on the air with nothing to say
+  // shows the normal Guest Pass line; anything else is a wrapping notice in
+  // the shared words, with "Use it here instead" when another of this guest's
+  // devices has the radio (pass-claim, no redial).
+  function renderPassState(ps) {
+    var el = document.getElementById('pass-banner');
+    if (!el || !window.PassWording || !PassWording.describeState) return;
+    if (!ps || (ps.state === 'on-air' && ps.reason === 'none')) {
+      el.classList.remove('pass-held');
+      el.classList.remove('pass-over');
+      renderPassBanner(lastPassSession);
+      return;
+    }
+    var w = PassWording.describeState(ps, { owner: passOwnerCall() });
+    if (!w.title) return;
+    el.textContent = '';
+    var span = document.createElement('span');
+    span.textContent = w.text;
+    el.appendChild(span);
+    if (w.action === 'Use it here instead') {
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'pass-state-btn';
+      btn.textContent = w.action;
+      btn.addEventListener('click', function() {
+        btn.disabled = true;
+        try { ws.send(JSON.stringify({ type: 'pass-claim' })); } catch (e) {}
+      });
+      el.appendChild(btn);
+    }
+    el.classList.add('pass-held');
+    el.classList.toggle('pass-over', !!w.terminal);
+    el.classList.remove('hidden');
+  }
   function renderPassBanner(ps) {
     if (ps && ps.code) lastPassSession = ps;
     // A Guest Pass session must never see the owner's billing (Cloud section
@@ -7830,7 +7876,8 @@
       var rec = '';
       rec += af('CALL', c.callsign);
       if (c.freq) rec += af('FREQ', c.freq);
-      rec += af('MODE', c.mode);
+      // adifMode + submode: the record's own pair (main.js getPastActivations).
+      rec += afMode(c.adifMode || c.mode, c.adifMode ? c.submode : '');
       rec += af('BAND', c.band);
       rec += af('QSO_DATE', act.date);
       rec += af('TIME_ON', c.timeOn);
@@ -7983,7 +8030,7 @@
       let rec = '';
       rec += af('CALL', c.callsign);
       if (c.freqKhz) rec += af('FREQ', (parseFloat(c.freqKhz) / 1000).toFixed(6));
-      if (c.mode) rec += af('MODE', c.mode);
+      if (c.mode) rec += afMode(c.mode, c.submode);
       if (c.band) rec += af('BAND', c.band);
       if (c.timeUtc) {
         const d = new Date();
@@ -8003,7 +8050,7 @@
       let rec = '';
       rec += af('CALL', c.callsign);
       if (c.freqKhz) rec += af('FREQ', (parseFloat(c.freqKhz) / 1000).toFixed(6));
-      if (c.mode) rec += af('MODE', c.mode);
+      if (c.mode) rec += afMode(c.mode, c.submode);
       if (c.rstSent) rec += af('RST_SENT', c.rstSent);
       if (c.rstRcvd) rec += af('RST_RCVD', c.rstRcvd);
       if (c._ts) {
@@ -8031,6 +8078,14 @@
   function af(name, val) {
     if (!val) return '';
     return `<${name}:${val.length}>${val}\n`;
+  }
+
+  /** MODE (+ SUBMODE) of an app mode, the desktop writer's rule
+   *  (lib/adif-mode.js): JS8 -> MFSK/JS8, PSK31 -> PSK/PSK31 (#381). */
+  function afMode(mode, submode) {
+    if (!mode) return '';
+    const ms = AdifMode.adifModeSubmode(String(mode), submode ? String(submode) : '');
+    return af('MODE', String(ms.mode || '')) + af('SUBMODE', String(ms.submode || ''));
   }
 
   // Refresh spot ages every 30s
@@ -8214,9 +8269,7 @@
    * PSK31/63 are PSK.
    */
   function lbModeFamily(q) {
-    const sub = String(q.SUBMODE || '').toUpperCase();
-    const m = String(q.MODE || '').toUpperCase();
-    const v = (m === 'MFSK' && sub) ? sub : m;
+    const v = AdifMode.recordMode(q);
     if (v === 'USB' || v === 'LSB') return 'SSB';
     if (/^PSK/.test(v)) return 'PSK';
     return v;
@@ -8236,7 +8289,7 @@
       if (from && d < from) return false;
       if (to && d > to) return false;
       if (!query) return true;
-      return [q.CALL, q.SIG_INFO, q.COMMENT, q.MODE, q.BAND].some(v => String(v || '').toUpperCase().includes(query));
+      return [q.CALL, q.SIG_INFO, q.COMMENT, AdifMode.recordMode(q), q.MODE, q.BAND].some(v => String(v || '').toUpperCase().includes(query));
     });
   }
 
@@ -8277,7 +8330,7 @@
       const idx = q.idx;
       const call = esc(q.CALL || '');
       const freqMhz = q.FREQ ? FreqDots.fromMhz(q.FREQ) : '';
-      const mode = esc(q.MODE || '');
+      const mode = esc(AdifMode.recordMode(q));
       const ref = esc(q.SIG_INFO || '');
       const date = formatLbDate(q.QSO_DATE || '');
       const time = formatLbTime(q.TIME_ON || '');
@@ -8303,7 +8356,7 @@
             <div class="log-field"><label>Freq MHz</label><input type="text" data-field="FREQ" value="${esc(q.FREQ || '')}"></div>
           </div>
           <div class="log-row">
-            <div class="log-field"><label>Mode</label><input type="text" data-field="MODE" value="${esc(q.MODE || '')}"></div>
+            <div class="log-field"><label>Mode</label><input type="text" data-field="MODE" value="${mode}"></div>
             <div class="log-field"><label>Band</label><input type="text" data-field="BAND" value="${band}"></div>
           </div>
           <div class="log-row">

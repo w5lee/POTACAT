@@ -445,10 +445,11 @@ const { activationStationFill } = require('./lib/activation-station'); // N7VBN:
 const { freqToBand, BANDS } = require('./lib/bands');
 const { splitHostPort } = require('./lib/host-port');
 const activationProgram = require('./lib/activation-program');
-const { applyQsoEdit, activationSigOf } = require('./lib/qso-edit'); // Logbook cell edits (#509)
+const { applyQsoEdit, modeEditFields, activationSigOf } = require('./lib/qso-edit'); // Logbook cell edits (#509)
 const ActivationClock = require('./lib/activation-clock'); // #147: a forgotten activation ends at the UTC day change or after 6 h idle
 const ActivationAnnounce = require('./lib/activation-announce'); // #508: which saved contacts join the live activation list
 const QsoExpand = require('./lib/qso-expand'); // one contact -> its ADIF records (logContact)
+const { dxccCodeForEntity } = require('./lib/dxcc-codes'); // cty.dat entity -> ADIF DXCC number (#554)
 const WatchlistEdit = require('./lib/watchlist-edit'); // watchlist add/remove by operation (ECHOCAT sync)
 const wsprnet = require('./lib/wspr/wsprnet');
 const wsprBands = require('./lib/wspr/bands');
@@ -545,10 +546,12 @@ const VaraProcess = require('./lib/vara-process');
 const VaraSetup = require('./lib/vara-setup');
 const WinlinkModes = require('./lib/winlink-modes');
 const WinlinkReturn = require('./lib/winlink-return');
+const WinlinkMailViews = require('./lib/winlink-mail-views');
 const WinlinkTxLevel = require('./lib/winlink-tx-level'); // #300: Winlink's own transmit audio level, and the session's levels
 const ModemAudioServerMod = require('./lib/modem-audio-server');
 const { ModemAudioLane } = require('./lib/modem-audio-lane-client'); // the modem's audio, off the main process (#187)
 const { buildAdifFields, buildAdifRecord, sqliteQsoToAdifFields, ADIF_HEADER, adifField } = require('./lib/adif-writer');
+const { adifAppMode, adifModeSubmode } = require('./lib/adif-mode');
 const { PassQsoOutbox } = require('./lib/pass-qso-outbox');
 const { ClublogOutbox } = require('./lib/clublog-outbox');
 const QsoLog = require('./lib/qso-log');
@@ -947,6 +950,7 @@ const GLOBAL_KEYS = new Set([
   'jtcatWaterfallSpeed', // waterfall lines/sec — display property of this screen
   'jtcatWaterfallFloor', // waterfall display noise floor (0..200) — same nature
   'jtcatShowBandScope',  // band-scope strip in the JTCAT pop-out (FT-710) — display
+  'jtcatStationsExpiryMin', // JTCAT Stations view: minutes a station stays (2/5/10) — display (#557)
   'waterfallPalette',  // waterfall / band scope colours (lib/waterfall-palettes.js) — display
                        // (same reasoning as lightMode/darkVariant above)
   'wsprPreCapPower',   // {watts, rigId, at}: the RF power the WSPR beacon found on the
@@ -7938,7 +7942,7 @@ function ensureRemoteClient() {
       win.webContents.send('remote-client-displaced', { ...info, kind: target.kind || '', owner: target.ownerCallsign || '' });
     }
   });
-  remoteClient.on('auth-fail', ({ reason, code, by, passReason, passAt, retryInMs }) => {
+  remoteClient.on('auth-fail', ({ reason, code, by, passReason, passAt, retryInMs, passState }) => {
     // A retryable refusal (the owner or another guest has the radio, or the
     // station could not check the pass with Cloud) is a wait, not a dead
     // pass: the client asks again on its own timer (#541).
@@ -7947,6 +7951,7 @@ function ensureRemoteClient() {
       targetId: target.id, reason: reason || 'refused', code: code || '', by: by || '',
       passReason: passReason || '', passAt: passAt || '', terminal,
       retryAt: terminal ? null : Date.now() + retryInMs,
+      passState: passState || null, // the station's pass-state for the refusal (#541 step 2)
     };
     const failCode = code || '';
     sendCatLog(`[Remote] ${target.kind === 'pass' ? 'Guest Pass' : 'pairing'} ${terminal ? 'refused' : 'waiting'}: ${reason}${failCode ? ' (' + failCode + ')' : ''}`);
@@ -7961,6 +7966,13 @@ function ensureRemoteClient() {
   remoteClient.on('pass-resumed', () => {
     sendCatLog('[guest-pass] the owner handed the radio back');
     if (win && !win.isDestroyed()) win.webContents.send('remote-pass-hold', { paused: false, owner: target.ownerCallsign || '', targetId: target.id });
+  });
+  // Guest Pass state from a station that knows pass-state (#541 step 2):
+  // on-air / waiting / reconnecting / over, with a reason. The renderer words
+  // it with lib/pass-wording.js describeState.
+  remoteClient.on('pass-state', (ps) => {
+    sendCatLog(`[guest-pass] state: ${ps.state} / ${ps.reason}${ps.device ? ' (' + ps.device + ')' : ''}`);
+    if (win && !win.isDestroyed()) win.webContents.send('remote-pass-state', { ...ps, owner: target.ownerCallsign || '', targetId: target.id });
   });
   remoteClient.on('status', (snap) => {
     _remoteClientLastStatus = snap;
@@ -8256,6 +8268,7 @@ function remoteAuthFailStatus(target) {
     owner: t.ownerCallsign || '', endsAt: t.expiresAt || null,
     reason: f.reason || '', code: f.code || '', by: f.by || '', passReason: f.passReason || '', passAt: f.passAt || '',
     retryAt: f.retryAt || null,
+    passState: f.passState || null,
   };
 }
 
@@ -12543,6 +12556,57 @@ function winlinkMailWindowOpen() {
   return !!(winlinkPopoutWin && !winlinkPopoutWin.isDestroyed());
 }
 
+// ECHOCAT devices with their Mail tab open (winlink-mail-view), by connection
+// id. They count like the desktop's mail window: the radio stays on the
+// gateway after a session while any of them is open (lib/winlink-mail-views.js).
+const _winlinkMailDevices = WinlinkMailViews.createMailViews();
+let _winlinkMailGoneTimer = null;
+
+/** A mail view is open somewhere: the desktop window or a device's Mail tab. */
+function winlinkMailViewOpen() {
+  return WinlinkMailViews.viewOpen({ windowOpen: winlinkMailWindowOpen(), devices: _winlinkMailDevices.count() });
+}
+
+/** One mail view closed (the window, or a device left its Mail tab): go back only after the last. */
+function winlinkMailViewClosed(why) {
+  const act = WinlinkMailViews.atViewClose({ windowOpen: winlinkMailWindowOpen(), devices: _winlinkMailDevices.count() });
+  if (act === 'keep') {
+    if (_winlinkPreviewReturnTo) winlinkLog(`${why === 'window closed' ? 'the mail window closed' : why}: the radio stays — another Mail view is still open (${winlinkMailWindowOpen() ? 'the mail window' : `${_winlinkMailDevices.count()} ECHOCAT device${_winlinkMailDevices.count() === 1 ? '' : 's'}`})`);
+    return;
+  }
+  winlinkPreviewRestore(why);
+}
+
+/**
+ * A device said winlink-mail-view, or its connection went (gone). A device
+ * that drops its link with the Mail tab open gets GONE_GRACE_MS to come back
+ * before the dial goes back.
+ */
+function winlinkMailViewSet(clientId, open, { gone } = {}) {
+  const was = _winlinkMailDevices.has(clientId);
+  _winlinkMailDevices.set(clientId, open);
+  if (open) {
+    if (_winlinkMailGoneTimer) { clearTimeout(_winlinkMailGoneTimer); _winlinkMailGoneTimer = null; }
+    if (!was) winlinkLog(`an ECHOCAT device opened its Mail tab (${_winlinkMailDevices.count()} open) — the radio stays on the gateway after a session while it is open`);
+    return;
+  }
+  if (!was) return;
+  if (!gone) return; // leaving the tab: the device sends winlink-qsy-restore, which goes back
+  winlinkMailDeviceGone();
+}
+
+/** A device with its Mail tab open is gone: wait for it before going back. */
+function winlinkMailDeviceGone() {
+  const act = WinlinkMailViews.atDeviceGone({ windowOpen: winlinkMailWindowOpen(), devices: _winlinkMailDevices.count(), sessionActive: winlinkSessionActive(), pending: _winlinkPreviewReturnTo });
+  if (act !== 'wait' || _winlinkMailGoneTimer) return;
+  winlinkLog(`the ECHOCAT device with its Mail tab open disconnected — the radio goes back to ${winlinkDialText(_winlinkPreviewReturnTo)} in ${Math.round(WinlinkMailViews.GONE_GRACE_MS / 1000)} s unless it comes back`);
+  _winlinkMailGoneTimer = setTimeout(() => {
+    _winlinkMailGoneTimer = null;
+    if (winlinkMailViewOpen() || winlinkSessionActive()) return;
+    winlinkPreviewRestore('the ECHOCAT device with its Mail tab open did not come back');
+  }, WinlinkMailViews.GONE_GRACE_MS);
+}
+
 /** A return is pending and the dial is not where POTACAT left it: say so, keep the original. */
 function winlinkNoteHandTune() {
   const r = _winlinkPreviewReturnTo;
@@ -12582,7 +12646,7 @@ function winlinkLogLeftAlone(lead, returnTo, leftAtHz) {
 /** Winlink stopped. With the mail window open it is a relaunch: the return point is kept. */
 function winlinkReturnOnStop(quit) {
   const r = _winlinkPreviewReturnTo;
-  const act = WinlinkReturn.atStop({ pending: r, windowOpen: winlinkMailWindowOpen(), quit: !!quit, leftAtHz: _winlinkLeftAtHz, nowHz: _currentFreqHz });
+  const act = WinlinkReturn.atStop({ pending: r, windowOpen: winlinkMailViewOpen(), quit: !!quit, leftAtHz: _winlinkLeftAtHz, nowHz: _currentFreqHz });
   if (act === 'none') return;
   if (act === 'keep') { winlinkLog(`Pat restarts with the mail window open — the radio still goes back to ${winlinkDialText(r)} when it closes`); return; }
   const leftAt = _winlinkLeftAtHz;
@@ -12986,7 +13050,7 @@ async function winlinkStartSession({ mode, gateway, dialKhz, url: rowUrl, origin
   winlinkSessionPush();
   winlinkLog(`session start: ${mode}${radio ? ` → ${String(gateway).toUpperCase()} on ${Number(dialKhz).toFixed(1)} kHz dial` : ''} (${origin || 'operator'})`);
   const _rt = winlinkState.session.returnTo;
-  if (radio && _rt && _rt.freqHz) winlinkLog(`the radio goes back to ${winlinkDialText(_rt)} ${winlinkMailWindowOpen() ? 'when the mail window closes (it stays put between attempts)' : 'when the session ends'}`);
+  if (radio && _rt && _rt.freqHz) winlinkLog(`the radio goes back to ${winlinkDialText(_rt)} ${winlinkMailViewOpen() ? 'when the last Mail view closes (it stays put between attempts)' : 'when the session ends'}`);
   if (radio) {
     settings.winlinkLastGateway = { call: String(gateway).toUpperCase(), mode, dialKhz: Number(dialKhz) || null };
     saveSettings(settings);
@@ -13495,10 +13559,10 @@ function winlinkEndSession(state, text, received = 0) {
     // The radio stays where the session put it while the mail window is open;
     // it goes back once, when the window closes (#187: a return per attempt
     // was two band changes, each an ATU tune). No window: go back now.
-    const _ret = WinlinkReturn.atSessionEnd({ tuned: s.tuned, returnTo: s.returnTo, windowOpen: winlinkMailWindowOpen() || retryWill });
+    const _ret = WinlinkReturn.atSessionEnd({ tuned: s.tuned, returnTo: s.returnTo, windowOpen: winlinkMailViewOpen() || retryWill });
     if (_ret === 'keep') winlinkKeepReturn(s.returnTo);
     else if (_ret === 'return') setTimeout(() => winlinkRestoreDial(s.returnTo), 1500);
-    if (retryWill && _ret === 'keep' && !winlinkMailWindowOpen()) _winlinkRetry.holdsReturn = true; // goes back if the retry is not made
+    if (retryWill && _ret === 'keep' && !winlinkMailViewOpen()) _winlinkRetry.holdsReturn = true; // goes back if the retry is not made
     winlinkFlexDaxRestore();
     releaseRadio('winlink');
     stopModemBridgeCable();
@@ -13646,7 +13710,7 @@ function winlinkRetryStop() {
 
 /** The radio was kept on the gateway for the retry, with no mail window open: put it back now. */
 function winlinkRetryReturnDial() {
-  if (winlinkMailWindowOpen() || winlinkSessionActive() || !_winlinkPreviewReturnTo) return;
+  if (winlinkMailViewOpen() || winlinkSessionActive() || !_winlinkPreviewReturnTo) return;
   const back = _winlinkPreviewReturnTo;
   const leftAt = _winlinkLeftAtHz;
   _winlinkPreviewReturnTo = null; _winlinkLeftAtHz = 0;
@@ -14362,7 +14426,7 @@ function winlinkSetMode(mode) {
 // ECHOCAT: every winlink-* request from a device. Registered through
 // onRemoteServer so it survives connectRemote() rebuilding the server. The
 // server already refused Guest Passes; `reply` answers the device that asked.
-async function winlinkHandleRemote({ type, req = {}, reply }) {
+async function winlinkHandleRemote({ type, req = {}, reply, clientId }) {
   const result = (op, r) => reply({ type: 'winlink-result', op, ok: !!(r && r.ok), ...(r && r.error ? { error: String(r.error) } : {}) });
   // Any request from a device's Mail tab starts Pat (the first one waits ≤ 15 s).
   if (type !== 'winlink-watch') winlinkEnsureStarted();
@@ -14415,7 +14479,9 @@ async function winlinkHandleRemote({ type, req = {}, reply }) {
         result('qsy', winlinkPreviewQsy({ dialKhz: req.dialKhz, mode: req.mode }));
         return;
       case 'winlink-qsy-restore':
-        winlinkPreviewRestore('ECHOCAT device left its Mail tab');
+        // This device left its Mail tab; the radio goes back only when no other Mail view is open.
+        _winlinkMailDevices.remove(clientId);
+        winlinkMailViewClosed('ECHOCAT device left its Mail tab');
         result('qsy-restore', { ok: true });
         return;
       case 'winlink-prompt':
@@ -14498,6 +14564,10 @@ async function winlinkHandleRemote({ type, req = {}, reply }) {
 onRemoteServer((rs) => {
   rs.on('winlink-request', (e) => { winlinkHandleRemote(e); });
   rs.on('winlink-watch', ({ count } = {}) => winlinkSetRemoteWatch(count));
+  // A device's Mail tab open or closed; gone = its connection went with the tab open.
+  rs.on('winlink-mail-view', ({ open, clientId, gone } = {}) => winlinkMailViewSet(clientId, !!open, { gone: !!gone }));
+  // The last device is gone: nothing of theirs is open any more.
+  rs.on('client-disconnected', () => { if (_winlinkMailDevices.any()) { _winlinkMailDevices.clear(); winlinkMailDeviceGone(); } });
   // A freshly built server hydrates new devices from its own cache — on or
   // off: an off shack hydrates {enabled:false} rather than nothing.
   if (typeof rs.broadcastWinlinkState === 'function' && settings) winlinkPush();
@@ -15856,6 +15926,7 @@ function shouldForwardClientDriven() {
 let passQsoOutbox = null;
 function passGuestLogContact(qsoData, ctx, canReceive, origin) {
   if (!qsoData.stationCallsign) qsoData.stationCallsign = onAirCall();
+  qsoData.guestPass = true; // the guest's own POTACAT forwards it to their loggers (#553)
   if (passLease) {
     if (!qsoData.operator) qsoData.operator = onAirCall();
     qsoData.stationLicensee = String(settings.myCallsign || '').toUpperCase();
@@ -16181,7 +16252,7 @@ async function qrzStationInfo(call) {
     // The DXCC entity (<land>), not the mailing country: KL7 and KH8 calls
     // were logged as United States (jgedmond, ClubLog flagged them).
     country: q.land || q.country || '', state: q.state || '', county: q.county || '', grid: q.grid || '',
-    qth: q.addr2 || '', cqz: q.cqzone || '', ituz: q.ituzone || '',
+    qth: q.addr2 || '', cqz: q.cqzone || '', ituz: q.ituzone || '', dxcc: q.dxcc || '',
   };
 }
 // An activation contact logged outside the Act screen (the Log window,
@@ -16355,6 +16426,7 @@ async function logContact(entry, opts) {
         name: op.entity.name, away: op.away, cont: op.entity.continent || '',
         cqz: (zones && zones.cqZone) || op.entity.cqZone || '',
         ituz: (zones && zones.ituZone) || op.entity.ituZone || '',
+        dxcc: dxccCodeForEntity(op.entity.name) || '',
       };
     },
     parkInfo: (ref) => {
@@ -19833,6 +19905,29 @@ function popoutJtcatOnDone(qso) {
     await jtcatAutoLog(qso, { fromWindow: true }); // use captured ref, not global (global may be replaced by auto-CQ)
     popoutBroadcastQso();
   };
+}
+// Answering a new caller, from any surface, lets go of the QSO running on
+// every surface: one transmitter, two QSO objects (lib/jtcat-state-machine.js
+// supersedeRunningQsos, #519). A complete one is logged, an unfinished one is
+// dropped and said so, never logged. The click's own surface rebuilds its
+// object in the reply handler; the other surface's is cleared here, so its
+// auto-sequence, retry cap and closeout can no longer log it or key the radio.
+async function jtcatSupersedeQsos(newCall, own) {
+  const out = _jtcatStateMachine.supersedeRunningQsos(
+    { popout: popoutJtcatQso, remote: remoteJtcatQso }, newCall, own);
+  for (const { surface, q, action, clear } of out) {
+    if (action === 'log') {
+      sendCatLog(`[JTCAT] Replacing the finished QSO with ${q.call} — logging it`);
+      await jtcatAutoLog(q, surface === 'popout' ? { fromWindow: true } : undefined);
+    } else if (!q._logged) {
+      sendCatLog(`[JTCAT] Left the QSO with ${q.call} unfinished (${q.phase}) — not logged`);
+    }
+    if (!clear) continue;
+    if (surface === 'popout' && popoutJtcatQso === q) { popoutJtcatQso = null; popoutBroadcastQso(); }
+    if (surface === 'remote' && remoteJtcatQso === q) { remoteJtcatQso = null; remoteJtcatBroadcastQso(); }
+  }
+  // The new station's QSO starts with this click (TIME_ON, lib/jtcat-qso-clock.js).
+  if (newCall) _jtcatQsoClock.note(newCall, Date.now());
 }
 function remoteJtcatOnDone(qso) {
   return async () => {
@@ -28917,18 +29012,9 @@ function connectRemote() {
       const hound = (!!settings.jtcatHoundMode || fox) && !jtcatFdContext();
       if (!jtcatReplySlot(targetEngine, call, slot, { hound, source: 'remote', retry: data, retryType: 'jtcat-reply' })) return;
     }
-    // Clicking another station abandons the running QSO. Log it only if it was
-    // already complete (lib/jtcat-state-machine.js replaceLogsQso); an
-    // unfinished one is dropped and said so, never logged (level_death 10/31).
-    if (remoteJtcatQso && remoteJtcatQso.call && remoteJtcatQso.call.toUpperCase() !== (call || '').toUpperCase()
-        && remoteJtcatQso.phase !== '73' && remoteJtcatQso.phase !== 'done') {
-      if (_jtcatStateMachine.replaceLogsQso(remoteJtcatQso, call)) {
-        sendCatLog(`[JTCAT] Replacing the finished QSO with ${remoteJtcatQso.call} — logging it`);
-        await jtcatAutoLog(remoteJtcatQso);
-      } else if (!remoteJtcatQso._logged) {
-        sendCatLog(`[JTCAT] Left the QSO with ${remoteJtcatQso.call} unfinished (${remoteJtcatQso.phase}) — not logged`);
-      }
-    }
+    // Clicking another station abandons the running QSO, on this surface and
+    // the window's: logged only if it was already complete (#519).
+    await jtcatSupersedeQsos(call, 'remote');
     // Halt any active TX (e.g. CQ) so reply goes out on next boundary
     if (targetEngine._txActive) targetEngine.txComplete();
     // Hound mode: fox at 300–900 Hz, hounds must call 1000–4000 Hz (see the
@@ -33778,7 +33864,7 @@ function buildQsoDetailsIndex() {
         call: rec.CALL || key,
         date: rec.QSO_DATE || '',
         time: rec.TIME_ON || '',
-        mode: rec.MODE || '',
+        mode: adifAppMode(rec.MODE, rec.SUBMODE),
         freq: adifFreqToKhz(rec.FREQ),
         band: rec.BAND || '',
         comment: rec.COMMENT || '',
@@ -36452,7 +36538,13 @@ function rawQsoToQsoData(raw) {
   return {
     callsign: raw.CALL || '',
     frequency: (freqMhz * 1000).toFixed(1), // MHz -> kHz
-    mode: raw.MODE || '',
+    // mode is the app mode (MFSK/JS8 -> JS8) for the loggers that take a mode
+    // name (WRL, the log line); adifMode + submode carry the record's own pair
+    // so buildAdifFields writes it back as it was (#381). SUBMODE used to be
+    // dropped here, so a resend or Cloud-pull forward went out as bare MFSK.
+    mode: adifAppMode(raw.MODE, raw.SUBMODE),
+    adifMode: raw.MODE || '',
+    submode: raw.SUBMODE || '',
     qsoDate: raw.QSO_DATE || '',
     timeOn: raw.TIME_ON || '',
     rstSent: raw.RST_SENT || '',
@@ -38606,7 +38698,7 @@ function scanLogForEvents() {
       const qsoData = {
         callsign: call,
         band: rec.BAND || '',
-        mode: rec.MODE || '',
+        mode: adifAppMode(rec.MODE, rec.SUBMODE),
         qsoDate: qsoDateStr,
         frequency: rec.FREQ || '',
       };
@@ -40901,7 +40993,7 @@ async function redeemGuestPass(rawInput) {
     return { ok: false, error: 'Cloud unreachable: ' + (err.message || err) };
   }
 
-  if (r.status === 404) return { ok: false, error: 'Pass not found, expired, or revoked' };
+  if (r.status === 404) return { ok: false, error: 'Pass not found, expired, or cancelled' };
   // Cloud's error codes in words; a raw snake_case code is never shown (#541).
   if (r.status === 403) return { ok: false, error: PassWording.redeemErrorText(r.body && r.body.error, 'This pass requires signing in to POTACAT Cloud first (the owner didn’t allow anonymous guests)') };
   if (r.status !== 200 || !r.body) return { ok: false, error: PassWording.redeemErrorText(r.body && r.body.error, 'Redeem failed (HTTP ' + r.status + ')') };
@@ -41648,7 +41740,7 @@ app.whenReady().then(() => {
       // clients and purges the browser sign-ins for that pass.
       onPassRevoked: (code) => {
         if (passEnforcement && passEnforcement.endPassIfCode(code, 'revoked')) {
-          sendCatLog(`[pass] revoked by the owner: the live Guest Pass session ended`);
+          sendCatLog(`[pass] Cancelled by the owner (Cancel pass): the live Guest Pass session ended`);
         }
       },
       // The signed-in account changed (any sign-in / sign-out path): the
@@ -42104,6 +42196,8 @@ function cloudShackNotice(text, kind) {
       const live = state === 'active' || state === 'expiring';
       if (live && !passLease) passLeaseBegin();
       else if (!live && passLease) passLeaseEnd();
+      // The guest's pass-state follows (on-air / ends-soon when expiring, #541 step 2).
+      try { if (remoteServer && remoteServer.broadcastPassState) remoteServer.broadcastPassState(); } catch {}
     });
     passEnforcement.on('expiring', (info) => {
       if (win && !win.isDestroyed()) {
@@ -42180,6 +42274,7 @@ function cloudShackNotice(text, kind) {
         const st = passEnforcement.getState();
         const s = passEnforcement.getSessionStatus();
         return { live: st === 'active' || st === 'expiring' || st === 'paused', paused: st === 'paused',
+          expiring: st === 'expiring', // pass-state on-air / ends-soon (#541 step 2)
           code: s.code || null, call: s.guestCallsign || s.onAirCallsign || '', endsAt: s.expiresAt || null };
       });
       rs.on('pass-paused', ({ source }) => {
@@ -42194,6 +42289,11 @@ function cloudShackNotice(text, kind) {
         const stopped = passLeaseStopTransmitters('resumed');
         passEnforcement.resume();
         sendCatLog(`[pass] The radio is back with the guest${guestConnected ? '' : ' (not connected: held 60 s)'}${stopped.length ? ' — stopped ' + stopped.join(', ') : ''}`);
+      });
+      // Share My Rig's status line and controls follow the owner's hold and a
+      // pending take (#200, lib/pass-owner-controls.js).
+      rs.on('pass-owner-controls', (c) => {
+        if (win && !win.isDestroyed()) win.webContents.send('pass-owner-controls', c);
       });
       rs.on('pass-guest-left', ({ code }) => {
         clearPassDisconnectTimer();
@@ -42259,6 +42359,36 @@ function cloudShackNotice(text, kind) {
   ipcMain.handle('pass-give-back', async () => {
     if (!remoteServer || !remoteServer.resumePass) return { error: 'No guest on the rig' };
     return { ok: remoteServer.resumePass('desktop') };
+  });
+
+  // Share My Rig's owner controls (#200): Take the radio (Now / In 5 minutes,
+  // with an optional message), cancel a pending take, Give it back. Cancel
+  // pass is passes-revoke (Cloud first, then the live session ends).
+  ipcMain.handle('pass-owner-get', () => {
+    const st = passEnforcement ? passEnforcement.getSessionStatus() : { state: 'idle' };
+    const controls = remoteServer && remoteServer.getPassOwnerControls ? remoteServer.getPassOwnerControls() : null;
+    const guestConnected = !!(remoteServer && remoteServer.hasActivePassClient && remoteServer.hasActivePassClient());
+    return { status: st, controls, guestConnected };
+  });
+  ipcMain.handle('pass-owner-take', async (_evt, opts) => {
+    if (!passEnforcement || !remoteServer || !remoteServer.takeOverPass) return { error: 'No guest on the rig' };
+    const o = opts || {};
+    const message = typeof o.message === 'string' ? o.message : '';
+    if (o.when === 'later') {
+      const r = remoteServer.scheduleTakeOverPass({ message });
+      if (r.ok) sendCatLog(`[pass] The owner takes the radio back at ${r.takeAt}; the guest keeps operating until then`);
+      return r.ok ? { ok: true, takeAt: r.takeAt } : { error: r.reason || 'refused' };
+    }
+    return { ok: remoteServer.takeOverPass('desktop', null, { message }) };
+  });
+  ipcMain.handle('pass-owner-cancel-take', async () => {
+    if (!remoteServer || !remoteServer.cancelPassTake) return { error: 'No guest on the rig' };
+    return { ok: remoteServer.cancelPassTake() };
+  });
+  ipcMain.handle('pass-owner-give-back', async () => {
+    if (!remoteServer || !remoteServer.resumePass) return { error: 'No guest on the rig' };
+    // Whoever took it (this PC or an owner device): the owner at the desk gives it back.
+    return { ok: remoteServer.resumePass() };
   });
 
   ipcMain.handle('pass-enforcement-end', async (_evt, reason) => {
@@ -44280,7 +44410,7 @@ function cloudShackNotice(text, kind) {
         settings.winlinkPopoutBounds = winlinkPopoutWin.getBounds(); saveSettings(settings);
       }
     });
-    winlinkPopoutWin.on('closed', () => { winlinkPopoutWin = null; _winlinkWatchAudio = false; winlinkPreviewRestore('window closed'); winlinkSyncModemBridge(); });
+    winlinkPopoutWin.on('closed', () => { winlinkPopoutWin = null; _winlinkWatchAudio = false; winlinkMailViewClosed('window closed'); winlinkSyncModemBridge(); });
     winlinkPopoutWin.webContents.on('did-finish-load', () => {
       winlinkPopoutSend('winlink-state', winlinkPayload());
       if (_winlinkPendingCompose) { winlinkPopoutSend('winlink-compose-prefill', _winlinkPendingCompose); _winlinkPendingCompose = null; }
@@ -46312,18 +46442,9 @@ function cloudShackNotice(text, kind) {
       const hound = (!!settings.jtcatHoundMode || fox) && !jtcatFdContext();
       if (!jtcatReplySlot(replyEngine, data.call, data.slot, { hound, source: 'popout', retry: data, retryType: 'jtcat-popout-reply' })) return;
     }
-    // Clicking another station abandons the running QSO. Log it only if it was
-    // already complete (lib/jtcat-state-machine.js replaceLogsQso); an
-    // unfinished one is dropped and said so, never logged (level_death 10/31).
-    if (popoutJtcatQso && popoutJtcatQso.call && popoutJtcatQso.call.toUpperCase() !== (data.call || '').toUpperCase()
-        && popoutJtcatQso.phase !== '73' && popoutJtcatQso.phase !== 'done') {
-      if (_jtcatStateMachine.replaceLogsQso(popoutJtcatQso, data.call)) {
-        sendCatLog(`[JTCAT] Replacing the finished QSO with ${popoutJtcatQso.call} — logging it`);
-        await jtcatAutoLog(popoutJtcatQso, { fromWindow: true });
-      } else if (!popoutJtcatQso._logged) {
-        sendCatLog(`[JTCAT] Left the QSO with ${popoutJtcatQso.call} unfinished (${popoutJtcatQso.phase}) — not logged`);
-      }
-    }
+    // Clicking another station abandons the running QSO, in the window and on
+    // ECHOCAT: logged only if it was already complete (#519).
+    await jtcatSupersedeQsos(data.call, 'popout');
     // Halt any active TX (e.g. CQ) so reply goes out on next boundary
     if (replyEngine._txActive) replyEngine.txComplete();
     // Hound mode (FT8 DXpedition): the Fox transmits at 300–900 Hz but
@@ -49468,6 +49589,14 @@ function cloudShackNotice(text, kind) {
     return { ok: true };
   });
 
+  // Guest Pass "Use it here instead" while this PC waits for the guest's
+  // other device on the same pass (pass-state waiting / other-device, #541
+  // step 2). The station answers with pass-state either way.
+  ipcMain.handle('remote-pass-claim', () => {
+    if (!remoteClient || !remoteClient.passClaim) return { error: 'Not connected to a station' };
+    return { ok: remoteClient.passClaim() };
+  });
+
   ipcMain.handle('connection-targets-get-status', () => {
     if (_remoteClientAuthFail && _remoteClientAuthFail.targetId === settings.activeTargetId) {
       const t = (settings.connectionTargets || []).find(x => x.id === _remoteClientAuthFail.targetId);
@@ -49480,6 +49609,8 @@ function cloudShackNotice(text, kind) {
     const s = remoteClient.state();
     return {
       state: s.authed ? 'connected' : (s.yielded ? 'standby' : (s.readyState === 1 ? 'authing' : 'connecting')),
+      // A Guest Pass connection's state on a station that sends pass-state (#541 step 2).
+      passState: s.authed ? (s.passState || null) : null,
       targetId: s.targetId,
       name: s.name,
       leg: s.leg,
@@ -50582,12 +50713,15 @@ function cloudShackNotice(text, kind) {
       // Build ADIF records from progress entries (legacy pre-stamping path)
       for (const [region, qso] of Object.entries(state.progress)) {
         const entry = (event.schedule || []).find(s => s.region === region);
+        // The progress entry keeps the app mode; ADIF wants MFSK/JS8 etc.
+        const ms = adifModeSubmode(qso.mode, '');
         records.push({
           CALL: qso.call,
           QSO_DATE: (qso.date || '').replace(/-/g, ''),
           TIME_ON: qso.time || '0000',
           BAND: qso.band,
-          MODE: qso.mode,
+          MODE: ms.mode,
+          SUBMODE: ms.submode || '',
           FREQ: qso.freq ? (parseFloat(qso.freq) / 1000).toFixed(6) : '',
           RST_SENT: qso.rstSent || '59',
           RST_RCVD: qso.rstRcvd || '59',
@@ -53639,7 +53773,12 @@ function cloudShackNotice(text, kind) {
           callsign: q.CALL || '',
           timeOn: q.TIME_ON || '',
           freq: q.FREQ || '',
-          mode: q.MODE || '',
+          // mode is what the list shows (MFSK/JS8 -> JS8); adifMode + submode
+          // are the record's own pair, which Export ADIF / Upload to POTA.app
+          // write back unchanged (#381).
+          mode: adifAppMode(q.MODE, q.SUBMODE),
+          adifMode: q.MODE || '',
+          submode: q.SUBMODE || '',
           band: q.BAND || '',
           rstSent: q.RST_SENT || '',
           rstRcvd: q.RST_RCVD || '',
@@ -54003,7 +54142,17 @@ function cloudShackNotice(text, kind) {
       mutateQsoLog((qsos) => {
         for (const q of qsos) {
           if (!matches(q)) continue;
-          Object.assign(q, updates);
+          // A Mode edit from the activator log is an app mode (JS8): write it
+          // as MODE + SUBMODE, the same rule as the Logbook cell (#381).
+          if (updates && Object.prototype.hasOwnProperty.call(updates, 'MODE')) {
+            const { MODE, ...rest } = updates;
+            Object.assign(q, rest);
+            for (const [k, v] of Object.entries(modeEditFields(q, MODE).fields)) {
+              if (v == null) delete q[k]; else q[k] = v;
+            }
+          } else {
+            Object.assign(q, updates);
+          }
           updated++;
         }
       });

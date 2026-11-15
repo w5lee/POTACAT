@@ -21,6 +21,8 @@ const TESTS = [
   'test/wsjtx-mode-notice-test.js',
   'test/guest-pass-listen-test.js',
   'test/guest-pass-state-541-test.js', // #541: a valid pass is never shown as revoked; Cloud answers, auth-fail codes, retry
+  'test/guest-pass-state-step2-test.js', // #541 step 2: pass-state, four states with a reason, one wording table, the claim rule
+  'test/guest-pass-owner-controls-test.js', // #200 / #541 step 3: Take the radio (Now / In 5 minutes), Give it back, Cancel pass
   'test/rigctld-spawn-test.js',
   'test/echocat-connect-diet-test.js',
   'test/cw-live-watchdog-test.js',
@@ -73,6 +75,7 @@ const TESTS = [
   'test/guest-pass-onair-call-test.js', // the pass's station call is the on-air call (K3SBP on W7RTA's pass)
   'test/guest-pass-lease-end-test.js', // the end of a pass stops every transmitter and closes the guest socket
   'test/guest-pass-hopping-test.js', // guests hop between rigs; the owner takes over and hands back
+  'test/guest-sdr-test.js', // #543: a guest uses the station's own SDRs; a typed-in host and SDR settings writes are refused in words
   'test/guest-pass-authority-test.js', // a Guest Pass is default-deny: the allowlist wall in the demux + the rig-control action wall
   'test/guest-pass-tx-gate-test.js', // the TX gate judges the effective TX frequency (split) and the radio's reported power against the cap
   'test/revoke-device-test.js', // revoking a device closes EVERY socket of that device; a socket whose pairing is gone is closed on its next message
@@ -133,6 +136,7 @@ const TESTS = [
   'test/rigctld-kenwood-power-test.js', // a TS-590/TS-2000 behind Hamlib keeps its power: raw PC, never Hamlib's PC000/PC255 probe
   'test/jtcat-tx-watchdog-test.js',
   'test/jtcat-replace-log-test.js',
+  'test/jtcat-second-caller-test.js',
   'test/port-picker-test.js',
   'test/pota-parks-db-test.js',
   'test/elecraft-data-mode-test.js',
@@ -220,8 +224,9 @@ const TESTS = [
   'test/settings-file-test.js', // settings written via temp+rename with a .bak; a truncated file is restored, never read as a fresh install
   'test/profile-switch-guard-test.js', // #344: no settings save between an operator switch and the restart; the new operator keeps its own callsign, log and Cloud sign-in
   'test/rig-list-lost-test.js', // #314: moving the operator pointer keeps the rig list; a catTarget becomes a rig only from a file with no rig list, and the log says so
-  'test/wsjtx-qdatetime-test.js', // QSO Logged dates are valid UTC; an invalid one never goes out as 1899 (ik4idf Logger32)
+  'test/wsjtx-qdatetime-test.js', // QSO Logged dates are valid UTC; an invalid one never goes out as 1899 (ik4idf Logger32); comments capped at 50 for Logger32 (#520)
   'test/kg4-us-calls-test.js', // #342 KG4 + two letters is Guantanamo, else US
+  'test/dxcc-entity-prefix-test.js', // #522 KL7 is Alaska, KH8 American Samoa, 6W/IK2HKT Senegal with CALL whole; cty.dat's entity beats QRZ's country
   'test/operating-entity-test.js', // W1AW/KL7 is Alaska; the log takes QRZ's DXCC entity, not its mailing country
   'test/hound-log-call-test.js', // a hound calls the fox's base call but logs the full call (level_death 6W/IK2HKT)
   'test/jtcat-hound-chip-test.js', // #160: HOUND chip is a two-way toggle on the main screen
@@ -244,6 +249,7 @@ const TESTS = [
   'test/rsba1-transport.test.js',
   'test/activation-log-test.js',
   'test/activation-program-test.js',
+  'test/adif-mode-test.js', // #381: MFSK submodes (JS8, JTTY, FT4, FT2) read by name everywhere; FT4/FT2 still written bare
   'test/qso-edit-test.js', // #509: My Park edit sets MY_SIG so Past Activations finds the QSO
   'test/activation-auto-end-test.js', // #147: a forgotten activation ends at the UTC day change or after 6 h with no contacts
   'test/activation-logging-388-test.js', // #388: a habit Tab after the RST jump is absorbed; a corrected park grid is kept per park
@@ -280,6 +286,7 @@ const TESTS = [
   'test/winlink-sent-routes-test.js', // #442: how each sent message went out (gateway, dial, mode or internet, time), kept by message id
   'test/winlink-summary-store-test.js', // #425: the session summary lines survive a restart, so Report a Bug still holds the session that dropped
   'test/winlink-folders-test.js', // #462 #475: Archive and back, the Deleted folder (copies, Restore, purge after N days), Reply all; a real Pat when present
+  'test/winlink-mail-views-test.js', // 2026-11-15 ECHOCAT ask: the dial stays on the gateway while a phone's Mail tab is open; two devices, the window and a phone, a closed socket
   'test/winlink-tx-level-test.js', // #300: Winlink's own TX level; the summary says the RX peak and what our overs sent; the pause between overs is not a gap
   'test/rigctld-shim-hamlib-test.js',
   'test/rigctld-died-test.js',
@@ -437,6 +444,7 @@ const TESTS = [
   'test/pota-sync-login-test.js',
   'test/pota-sync-log-test.js', // #406: the pota.app Connect step logs names and lengths, never a value
   'test/qso-expand-test.js',
+  'test/dxcc-codes-test.js', // #554: logged contacts carry the ADIF DXCC entity number
   'test/sota-chase-test.js', // #191: a POTA-primary record carrying a sotaRef uploads its SOTA chase
   'test/spot-programs-test.js', // POTA + SOTA spot: both pills, summit in the Ref column
   'test/spot-park-state-test.js', // a multi-state park's state from the activator's spot locationCode (N0KAH)
@@ -515,6 +523,7 @@ const TESTS = [
   'test/decode-contract-test.js',
   'test/ft8-wasm-bracket-test.js',
   'test/layout-alignment-test.js',
+  'test/jtcat-stations-test.js', // #557: the Stations view, one line per station heard (fold, expiry, clear, sort, row, click)
   'test/jtcat-own-tx-offset-test.js', // #503: our own TX rows show the offset that slot went out on
   'test/net-reminder-row-test.js', // a Net Reminders row always names its net (#284)
   'test/freq-dots-test.js', // every frequency an operator reads is written the VFO way, 14.074.00 (Casey 2026-11-11)

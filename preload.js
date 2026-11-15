@@ -141,6 +141,14 @@ contextBridge.exposeInMainWorld('api', {
   },
   // Guest Pass: the owner took the radio back ({paused:true}) or handed it
   // back ({paused:false}). #541
+  // Guest Pass state from the station ({state, reason, endsAt, takeAt?,
+  // message?, device?, owner, targetId}) and "Use it here instead". #541 step 2
+  onRemotePassState: (cb) => {
+    const handler = (_e, info) => cb(info || {});
+    ipcRenderer.on('remote-pass-state', handler);
+    return () => ipcRenderer.removeListener('remote-pass-state', handler);
+  },
+  remotePassClaim: () => ipcRenderer.invoke('remote-pass-claim'),
   onRemotePassHold: (cb) => {
     const handler = (_e, info) => cb(info || {});
     ipcRenderer.on('remote-pass-hold', handler);
@@ -230,6 +238,12 @@ contextBridge.exposeInMainWorld('api', {
   passEnforcementEnd: (reason) => ipcRenderer.invoke('pass-enforcement-end', reason),
   passTakeOver: () => ipcRenderer.invoke('pass-take-over'),
   passGiveBack: () => ipcRenderer.invoke('pass-give-back'),
+  // Share My Rig's owner controls (#200).
+  passOwnerGet: () => ipcRenderer.invoke('pass-owner-get'),
+  passOwnerTake: (opts) => ipcRenderer.invoke('pass-owner-take', opts),
+  passOwnerCancelTake: () => ipcRenderer.invoke('pass-owner-cancel-take'),
+  passOwnerGiveBack: () => ipcRenderer.invoke('pass-owner-give-back'),
+  onPassOwnerControls: (cb) => ipcRenderer.on('pass-owner-controls', (_e, c) => cb(c)),
   onPassEnforcementState: (cb) => {
     const handler = (_e, status) => cb(status);
     ipcRenderer.on('pass-enforcement-state', handler);
