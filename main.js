@@ -21131,12 +21131,31 @@ function startJtcat(mode) {
   // without opening DevTools / Node console.
   ft8Engine.on('log', (line) => sendCatLog('[JTCAT] ' + line));
 
+  const studyEngine = ft8Engine;
+  studyEngine.shouldDeferFt8Tx = (periodStartMs, slot) => {
+    if (studyEngine !== ft8Engine || !tciJtcatQsoMode() || !studyEngine._autoSeq) return false;
+    const qso = [popoutJtcatQso, remoteJtcatQso].find(q => q && q.txMsg === studyEngine._txMessage);
+    return ft8RetryStudy.defer(qso, { periodStartMs, slot, dialHz: _currentFreqHz,
+      offsetHz: studyEngine._txFreq, hold: settings.jtcatHoldTxFreq });
+  };
+
   ft8Engine.on('decode', async (data) => {
     if (data.mode === 'FT8' && _currentFreqHz && !_fakeIt.active && !_fakeIt.restorePending) {
       ft8OffsetStudy.setContext(ft8Engine, _currentFreqHz);
       if (ft8OffsetStudy.observe(data)) compareFt8Offset(ft8Engine, data.slot, 'receive');
-      ft8RetryStudy.observe(popoutJtcatQso, { ...data, dialHz: _currentFreqHz });
-      ft8RetryStudy.observe(remoteJtcatQso, { ...data, dialHz: _currentFreqHz });
+      for (const qso of [popoutJtcatQso, remoteJtcatQso]) {
+        ft8RetryStudy.observe(qso, { ...data, dialHz: _currentFreqHz }, (previousHz, hz) => {
+          if (settings.jtcatHoldTxFreq || !studyEngine._txEnabled || studyEngine._txActive
+              || studyEngine._txMessage !== qso.txMsg || studyEngine._txFreq !== previousHz) return false;
+          studyEngine.setTxFreq(hz);
+          if (studyEngine._txFreq !== hz) return false;
+          if (jtcatPopoutWin && !jtcatPopoutWin.isDestroyed()) {
+            jtcatPopoutWin.webContents.send('jtcat-tx-freq-set', { hz, mode: 'FT8' });
+          }
+          if (remoteServer?.hasClient()) remoteServer.broadcastJtcatTxStatus({ state: 'rx', txFreq: hz });
+          return true;
+        });
+      }
     }
     // Enrich decodes with "needed" flags for call roster
     if (data.results) {
