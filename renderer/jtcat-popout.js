@@ -1992,7 +1992,7 @@ function _applyPopoutTheme(payload) {
   // and takes over the shared slot.
   if (window.api.onJtcatQsoNotice) {
     window.api.onJtcatQsoNotice(function(data) {
-      showJtcatWarnToast((data && data.message) || 'QSO closed out');
+      showJtcatWarnToast((data && data.message) || 'QSO closed out', data && data.sub);
     });
   }
 
