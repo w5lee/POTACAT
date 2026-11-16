@@ -19752,6 +19752,11 @@ const _jtcatQsoClock = new JtcatQsoClock(); // when each QSO under way began
 // Contacts waiting in the Log QSO window (settings.jtcatLogPrompt).
 const jtcatLogReviews = new LogReview.LogReviewQueue();
 
+function echoCatLogSource() {
+  const platform = remoteServer?.activeClientContext?.()?.platform;
+  return /^(ios|android|web)(?:\s|$)/i.test(platform || '') ? 'EchoCAT' : '';
+}
+
 async function jtcatAutoLog(qso, opts) {
   const q = qso || remoteJtcatQso;
   if (!q || !q.call) {
@@ -19837,6 +19842,7 @@ async function jtcatAutoLog(qso, opts) {
     gridsquare: q.grid || '',
     // Optional operating surface and mode in the ADIF comment.
     comment: settings.jtcatLogComment !== false ? `${logSource} ${mode}` : '',
+    logSource: opts?.fromWindow ? '' : echoCatLogSource(),
   };
   // The completed TX slot attached the measured peak to this QSO object.
   const transmission = tciQsoTransmit.get(q);
@@ -29157,6 +29163,7 @@ function connectRemote() {
         wwffRef: data.wwffRef || '',
         llotaRef: data.llotaRef || '',
         comment: String(data.userComment || '').trim(),
+        logSource: echoCatLogSource(),
         gridsquare: theirGrid,
         gridHeard: !!theirGrid,
         myGridsquare: data.myGridsquare || '', // the device's own grid; else the park's (saveQsoRecord), never home
@@ -37189,6 +37196,7 @@ function rawQsoToQsoData(raw) {
     submode: raw.SUBMODE || '',
     qsoDate: raw.QSO_DATE || '',
     timeOn: raw.TIME_ON || '',
+    logSource: raw.APP_POTACAT_LOG_SOURCE || '',
     rstSent: raw.RST_SENT || '',
     rstRcvd: raw.RST_RCVD || '',
     txPower: raw.TX_PWR || '',
@@ -54578,6 +54586,7 @@ function cloudShackNotice(text, kind) {
           adifMode: q.MODE || '',
           submode: q.SUBMODE || '',
           band: q.BAND || '',
+          logSource: q.APP_POTACAT_LOG_SOURCE || '',
           rstSent: q.RST_SENT || '',
           rstRcvd: q.RST_RCVD || '',
           name: q.NAME || '',
