@@ -39,11 +39,12 @@ function harness() {
     settings: { ultracat: false },
     jtcatFullAutoCq: false, jtcatAutoCqMode: 'off',
     jtcatFullAutoCqLastActivity: 0, _jtcatTxWatchArmedAt: 0,
-    JTCAT_TX_WATCHDOG_MS: MS,
+    JTCAT_TX_WATCHDOG_MS: MS, JTCAT_FULL_AUTO_CQ_WATCHDOG_MS: 30 * 60000,
+    tciJtcatQsoMode: () => false,
   };
   ctx.Date = { now: () => ctx.now };
   vm.createContext(ctx);
-  vm.runInContext(extract('function jtcatTxWatchdogTripped(') + '\n' + extract('function jtcatNoteOperatorAtRadio('), ctx);
+  vm.runInContext(extract('function jtcatTxWatchdogLimit(') + '\n' + extract('function jtcatTxWatchdogTripped(') + '\n' + extract('function jtcatNoteOperatorAtRadio('), ctx);
   return ctx;
 }
 const min = 60000;
@@ -96,9 +97,21 @@ test("ULTRACAT's Run and Hunt keep their own rules; plain Hunt is watched", () =
   assert.strictEqual(vm.runInContext("jtcatTxWatchdogTripped('FT8')", c), true, 'ULTRACAT with neither running');
 });
 
+test('TCI FT8 Hunt uses the existing thirty-minute unattended cutoff', () => {
+  const c = harness();
+  c.tciJtcatQsoMode = () => true;
+  c.jtcatAutoCqMode = 'all';
+  vm.runInContext('jtcatNoteOperatorAtRadio()', c);
+  c.now += 7 * min;
+  assert.strictEqual(vm.runInContext("jtcatTxWatchdogTripped('FT8')", c), false);
+  assert.strictEqual(vm.runInContext("jtcatTxWatchdogTripped('FT4')", c), true);
+  c.now += 24 * min;
+  assert.strictEqual(vm.runInContext("jtcatTxWatchdogTripped('FT8')", c), true);
+});
+
 test('both key-downs refuse and stop when it trips', () => {
-  assert.ok(/if \(jtcatTxWatchdogTripped\(ft8Engine && ft8Engine\._mode\)\) \{[\s\S]{0,160}jtcatTxWatchdogStop\(\);\s*return;/.test(MAIN), 'single slice');
-  assert.ok(/if \(jtcatTxWatchdogTripped\(engine\._mode\)\) \{[\s\S]{0,160}jtcatTxWatchdogStop\(\);\s*return;/.test(MAIN), 'multi-slice');
+  assert.ok(/if \(jtcatTxWatchdogTripped\(ft8Engine && ft8Engine\._mode\)\) \{[\s\S]{0,160}jtcatTxWatchdogStop\([^)]*\);\s*return;/.test(MAIN), 'single slice');
+  assert.ok(/if \(jtcatTxWatchdogTripped\(engine\._mode\)\) \{[\s\S]{0,160}jtcatTxWatchdogStop\([^)]*\);\s*return;/.test(MAIN), 'multi-slice');
 });
 
 test('the stop uses the one halt and tells every surface why', () => {

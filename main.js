@@ -19016,6 +19016,13 @@ function jtcatNoteOperatorAtRadio() {
  * JS8) are one operator action per send and WSPR is a beacon, so only the
  * slotted FT modes are watched.
  */
+function jtcatTxWatchdogLimit(mode) {
+  if (mode === 'FT8' && jtcatAutoCqMode !== 'off' && !jtcatFullAutoCq && tciJtcatQsoMode()) {
+    return JTCAT_FULL_AUTO_CQ_WATCHDOG_MS;
+  }
+  return JTCAT_TX_WATCHDOG_MS;
+}
+
 function jtcatTxWatchdogTripped(mode) {
   const m = String(mode || '').toUpperCase();
   if (m !== 'FT8' && m !== 'FT4' && m !== 'FT2') return false;
@@ -19023,11 +19030,11 @@ function jtcatTxWatchdogTripped(mode) {
   const now = Date.now();
   const last = Math.max(jtcatFullAutoCqLastActivity || 0, _jtcatTxWatchArmedAt || 0);
   if (!last) { _jtcatTxWatchArmedAt = now; return false; }
-  return now - last > JTCAT_TX_WATCHDOG_MS;
+  return now - last > jtcatTxWatchdogLimit(m);
 }
 
-function jtcatTxWatchdogStop() {
-  const mins = Math.round(JTCAT_TX_WATCHDOG_MS / 60000);
+function jtcatTxWatchdogStop(mode) {
+  const mins = Math.round(jtcatTxWatchdogLimit(mode) / 60000);
   const keepHunt = jtcatAutoCqMode !== 'off' && !jtcatFullAutoCq && !jtcatHuntFallbackMode;
   const why = `TX watchdog: ${mins} minutes with no reply or operator activity. ` +
     (keepHunt ? 'Hunt paused. Select your Hunt mode again to resume.' : 'TX stopped. Call CQ or reply again to carry on.');
@@ -21712,7 +21719,7 @@ function startJtcat(mode) {
     }
     if (jtcatTxWatchdogTripped(ft8Engine && ft8Engine._mode)) {
       jtcatRefuseTx('the JTCAT TX watchdog tripped');
-      jtcatTxWatchdogStop();
+      jtcatTxWatchdogStop(ft8Engine?._mode);
       return;
     }
     if (tciTestData || tciRigTarget()) {
@@ -54227,7 +54234,7 @@ function cloudShackNotice(text, kind) {
         if (jtcatTxWatchdogTripped(engine._mode)) {
           engine._txEnabled = false;
           if (engine._txActive) engine.txComplete();
-          jtcatTxWatchdogStop();
+          jtcatTxWatchdogStop(engine._mode);
           return;
         }
         const catState = cat ? `connected=${cat.connected}` : 'cat=null';
