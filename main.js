@@ -4507,6 +4507,10 @@ function sendCatFrequency(hz) {
     console.warn(`[CAT] Ignoring suspicious frequency: ${hz} Hz (below 100 kHz)`);
     return;
   }
+  if (!_fakeIt.active && !_fakeIt.restorePending && ft8OffsetStudy.context?.dialHz !== hz) {
+    ft8OffsetStudy.setContext(ft8Engine, hz);
+    ft8StudyBaseline = null;
+  }
   // SWR-guard latch: leaving the band it tripped on plausibly changes the
   // match (different antenna/resonance) — re-enable TX. Single sink for every
   // frequency source (tune, knob, scan, remote), so no per-path hooks needed.
@@ -17489,6 +17493,21 @@ let remoteJtcatQso = null;
 const JtcatQuietFreq = require('./lib/jtcat-quiet-freq');
 const jtcatQuietTracker = JtcatQuietFreq.createQuietFreqTracker();
 function jtcatQuietPick() { return jtcatQuietTracker.current(Date.now()); }
+
+const { Ft8OffsetStudy } = require('./lib/ft8-offset-study');
+const ft8OffsetStudy = new Ft8OffsetStudy(row =>
+  appendDiagnosticLog('ft8-offset-study.log', JSON.stringify(row)));
+let ft8StudyBaseline = null;
+
+function compareFt8Offset(engine, slot, kind) {
+  if (engine?._mode !== 'FT8' || !_currentFreqHz || !ft8StudyBaseline
+      || ft8StudyBaseline.engine !== engine || ft8StudyBaseline.dialHz !== _currentFreqHz) return;
+  ft8OffsetStudy.setContext(engine, _currentFreqHz);
+  ft8OffsetStudy.compare({
+    now: StationClock.now(), slot, kind, baselineAt: ft8StudyBaseline.at,
+    currentHz: kind === 'cq' ? engine._txFreq : jtcatQuietPick(),
+  });
+}
 // WSPR beacon state — driven by the IPC handler + a 1 s scheduler tick.
 // The beacon's default RF power, 1 W. Since #268 it runs at the level the
 // operator sets while it is armed, and reports that power (lib/wspr/dbm.js).
@@ -18627,6 +18646,7 @@ function jtcatCqSlot(engine) {
   const lateCapMs = (eng && typeof eng.lateStartCapMs === 'function' && eng.lateStartCapMs()) || 500;
   const d = JtcatTxSlot.decideCqSlot({ lock: jtcatTxSlotLock(), lastTx: _jtcatLastTx, nowMs: StationClock.now(), periodMs, lateCapMs });
   if (eng) eng.setTxSlot(d.slot);
+  if (!settings.jtcatHoldTxFreq) compareFt8Offset(eng, d.slot, 'cq');
   return d.slot;
 }
 
@@ -20805,6 +20825,10 @@ function startJtcat(mode) {
   // right after the engine is built (#688: "Hold TX Freq: ON").
 
   ft8Engine.on('decode', async (data) => {
+    if (data.mode === 'FT8' && _currentFreqHz && !_fakeIt.active && !_fakeIt.restorePending) {
+      ft8OffsetStudy.setContext(ft8Engine, _currentFreqHz);
+      if (ft8OffsetStudy.observe(data)) compareFt8Offset(ft8Engine, data.slot, 'receive');
+    }
     // Enrich decodes with "needed" flags for call roster
     if (data.results) {
       // Surface AP (a priori) recoveries — decodes the plain pass missed,
@@ -54078,6 +54102,10 @@ function cloudShackNotice(text, kind) {
 
   ipcMain.on('jtcat-quiet-freq', (_e, hz) => {
     jtcatQuietTracker.report('window', hz, Date.now());
+
+    if (ft8Engine?._mode === 'FT8' && _currentFreqHz && !_fakeIt.active && !_fakeIt.restorePending) {
+      ft8StudyBaseline = { engine: ft8Engine, dialHz: _currentFreqHz, at: StationClock.now() };
+    }
   });
   ipcMain.on('jtcat-spectrum', (_e, bins) => {
     // While a remote client holds a spectrum subscription, the in-process FFT
