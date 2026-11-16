@@ -715,3 +715,39 @@ for (const serverName of ['zeus', 'thetis']) {
     }
   });
 }
+
+
+test('refuses an unknown or excessive capped drive before keying voice or digital', { timeout: 3000 }, async () => {
+  const server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
+  await once(server, 'listening');
+  let drive = null;
+  let modeChanged;
+  const client = connectTciJtcatRx(server.address().port, {
+    getTxDriveLimit: () => ({ limit: 20, percent: drive }),
+    onMode: () => modeChanged?.(),
+    onAudio() {}, onDial() {}, log() {},
+  });
+  try {
+    const [peer] = await once(server, 'connection');
+    const subscription = once(peer, 'message');
+    peer.send('vfo:0,0,14074000;vfo:0,1,14074000;modulation:0,USB;trx:0,false;ready;');
+    await subscription;
+    const samples = new Float32Array([0.25]);
+    assert.match(client.startTx(samples, 14074000, () => {}), /DIGU/);
+    assert.match(client.startVoiceTx(() => true, 1000, () => {}), /confirmed TX drive/);
+    drive = 21;
+    assert.match(client.startVoiceTx(() => true, 1000, () => {}), /exceeds/);
+    const changed = new Promise(resolve => { modeChanged = resolve; });
+    peer.send('modulation:0,DIGU;');
+    await changed;
+    assert.match(client.startTx(samples, 14074000, () => {}), /exceeds/);
+    drive = 20;
+    const key = once(peer, 'message');
+    assert.equal(client.startTx(samples, 14074000, () => {}), '');
+    assert.equal((await key)[0].toString(), 'trx:0,true,tci;');
+  } finally {
+    client.close();
+    for (const peer of server.clients) peer.terminate();
+    await new Promise(resolve => server.close(resolve));
+  }
+});

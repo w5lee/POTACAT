@@ -142,6 +142,7 @@ const { connectTciJtcatRx, probeTci, AUDIO_RATE: TCI_RX_RATE } = require('./lib/
 let tciTestRadio = null;
 let tciReconnectTimer = null;
 let tciDriveKnown = false;
+let tciDrivePoll = null;
 let tciManualForward = null;
 let tciTestSetupBusy = false;
 let tciEchoAudioConnected = false;
@@ -20646,9 +20647,34 @@ function connectTciTestRadio() {
     );
   };
   let driveReadback = 0;
+  let zeusDriveSample = null;
+  let drivePollInFlight = false;
+  let driveCommandPending = false;
+  async function pollCappedZeusDrive() {
+    if (drivePollInFlight || driveCommandPending || !tciRigTarget() || !AmpDrive.currentFlexPctLimit()) return;
+    drivePollInFlight = true;
+    const revision = driveReadback;
+    try {
+      const engine = await readLocalZeusEngine();
+      if (tciTestRadio === radio && driveReadback === revision) {
+        zeusDriveSample = engine?.state.status === 'Connected' && Number.isFinite(engine.state.drivePct)
+          ? { percent: engine.state.drivePct, at: Date.now() } : null;
+      }
+    } catch {
+      if (driveReadback === revision) zeusDriveSample = null;
+    } finally {
+      drivePollInFlight = false;
+    }
+  }
   const radio = connectTciJtcatRx(port, {
     host,
     server,
+    getTxDriveLimit() {
+      const limit = tciRigTarget() ? AmpDrive.currentFlexPctLimit() : 0;
+      if (server !== 'zeus') return { limit, percent: tciDriveKnown ? _currentTxPower : null };
+      const percent = zeusDriveSample && Date.now() - zeusDriveSample.at < 2000 ? zeusDriveSample.percent : null;
+      return { limit, percent };
+    },
     async getZeusFixedGain() {
       if (server !== 'zeus' || !['127.0.0.1', 'localhost', '::1'].includes(host)) return null;
       const engine = await readLocalZeusEngine().catch(error => {
@@ -20672,6 +20698,8 @@ function connectTciTestRadio() {
     onLink(connected) {
       if (tciTestRadio !== radio) return;
       if (!connected) {
+        clearInterval(tciDrivePoll);
+        tciDrivePoll = null;
         tciSpecRing.clear();
         tciTxSpecRing.clear();
         if (tciScopeRadio === radio) stopTciScope();
@@ -20685,6 +20713,11 @@ function connectTciTestRadio() {
           tciReconnectTimer.unref();
         }
       } else {
+        if (server === 'zeus') {
+          tciDrivePoll = setInterval(pollCappedZeusDrive, 750);
+          tciDrivePoll.unref();
+          void pollCappedZeusDrive();
+        }
         recallAgc(agcGroup(mode), false);
         if (yaesuScopeWanted() && scopeSourceKind() === 'tci') startTciScope();
       }
@@ -20750,13 +20783,22 @@ function connectTciTestRadio() {
       if (percent !== null) _currentRfGain = percent;
       broadcastRigState();
     },
+    onDrivePending() {
+      driveCommandPending = true;
+      ++driveReadback;
+      zeusDriveSample = null;
+      tciDriveKnown = false;
+    },
     async onDrive(percent, driveSetInSession) {
+      driveCommandPending = false;
       const revision = ++driveReadback;
+      zeusDriveSample = null;
       // Zeus TCI echoes its session drive value. The local engine reports
       // the effective value after applying the rig's drive limit.
       const engine = await Promise.resolve(readLocalZeusEngine()).catch(() => null);
       if (tciTestRadio !== radio || revision !== driveReadback) return;
       const engineDrive = engine?.state.drivePct;
+      if (engine?.state.status === 'Connected' && Number.isFinite(engineDrive)) zeusDriveSample = { percent: engineDrive, at: Date.now() };
       // Zeus initializes each TCI connection's drive echo to 50. Until a
       // write on this connection, only the engine can confirm the setting.
       if (server === 'zeus' && !Number.isFinite(engineDrive) && !driveSetInSession) return;
@@ -20844,6 +20886,8 @@ function connectTciTestRadio() {
 }
 
 function closeTciTestRadio() {
+  clearInterval(tciDrivePoll);
+  tciDrivePoll = null;
   clearTimeout(tciReconnectTimer);
   tciReconnectTimer = null;
   const radio = tciTestRadio;
@@ -20968,7 +21012,7 @@ function startJtcat(mode) {
     // Costas + AP). Explicit false disables for strict slot-boundary parity.
     if (typeof ft8Engine.setLateStartTx === 'function') {
       // The TCI test sends a complete FT8 waveform at a slot boundary.
-      ft8Engine.setLateStartTx(!tciTestData && !tciRigTarget() && settings.jtcatLateStartTx !== false);
+      ft8Engine.setLateStartTx(!tciTestData && settings.jtcatLateStartTx !== false);
     }
     fakeItSyncEngine(); // split operation "Fake It" (single band, a dial this PC can move)
     // AP (a priori) decode — RX mirror of late-start TX. Default ON. myCall is
@@ -21724,6 +21768,24 @@ function startJtcat(mode) {
       jtcatTxWatchdogStop(ft8Engine?._mode);
       return;
     }
+    // Late-start TX (WSJT-X waveform truncation). When the engine fires past
+    // the 500ms pad window it attaches data.lateStart. We can't pad the
+    // envelope back to slot+500ms (that moment is gone), so slice the leading
+    // symbols off the pre-rendered buffer HERE — once, at the dispatch choke
+    // point — and rewrite offsetMs to a small PTT-settle lead. Every audio
+    // route below (SmartSDR direct, Icom network, renderer DAX, failsafe)
+    // then plays the already-truncated buffer with its existing leading-
+    // silence math, prepending only the settle. The buffer TAIL is untouched,
+    // so PTT-off still lands at slot+13.14s and never trails into the
+    // responder's next slot — the distinction from the reverted 2026-05-08
+    // pad-and-play-full-buffer-late path. The leading Costas array is
+    // sacrificed; the receiver re-syncs on the middle/end Costas arrays.
+    if (data.lateStart && data.samples && data.samples.length) {
+      const before = data.samples.length;
+      data.samples = Ft8Engine.sliceLateStartBuffer(data.samples, data.lateStart, 12000);
+      data.offsetMs = Math.round(500 - data.lateStart.leadingDelaySec * 1000);
+      sendCatLog(`[JTCAT] Late-start TX: truncated waveform ${before}→${data.samples.length} samples (skipped ${data.lateStart.playOffsetSec.toFixed(2)}s of leading symbols), tail preserved so PTT-off stays on time; routes prepend ${500 - data.offsetMs}ms PTT settle`);
+    }
     if (tciTestData || tciRigTarget()) {
       // TCI carries JTCAT audio directly. Keep the normalized waveform in range.
       const deny = (reason) => {
@@ -21747,9 +21809,9 @@ function startJtcat(mode) {
         return;
       }
       if (!tciTestRadio || !onAirCall() ||
-          data.lateStart || data.dialShiftHz || !(data.freq >= 200 && data.freq <= 2950) ||
+          data.dialShiftHz || !(data.freq >= 200 && data.freq <= 2950) ||
           !Number.isFinite(data.offsetMs) || data.offsetMs > 500) {
-        deny('TCI requires a station callsign and on-time audio at 200–2950 Hz with Fake It off');
+        deny('TCI requires a station callsign and audio at 200–2950 Hz with Fake It off');
         return;
       }
       const selectedFreq = _jtcatExpectedDialHz ||
@@ -21802,24 +21864,6 @@ function startJtcat(mode) {
     console.log(`[JTCAT] TX start requested — message: ${data.message}, ${catState}`);
     logIcomNetworkAudio(`FT8 TX: ${data.message} freq=${data.freq}Hz slot=${data.slot} ${catState}`);
 
-    // Late-start TX (WSJT-X waveform truncation). When the engine fires past
-    // the 500ms pad window it attaches data.lateStart. We can't pad the
-    // envelope back to slot+500ms (that moment is gone), so slice the leading
-    // symbols off the pre-rendered buffer HERE — once, at the dispatch choke
-    // point — and rewrite offsetMs to a small PTT-settle lead. Every audio
-    // route below (SmartSDR direct, Icom network, renderer DAX, failsafe)
-    // then plays the already-truncated buffer with its existing leading-
-    // silence math, prepending only the settle. The buffer TAIL is untouched,
-    // so PTT-off still lands at slot+13.14s and never trails into the
-    // responder's next slot — the distinction from the reverted 2026-05-08
-    // pad-and-play-full-buffer-late path. The leading Costas array is
-    // sacrificed; the receiver re-syncs on the middle/end Costas arrays.
-    if (data.lateStart && data.samples && data.samples.length) {
-      const before = data.samples.length;
-      data.samples = Ft8Engine.sliceLateStartBuffer(data.samples, data.lateStart, 12000);
-      data.offsetMs = Math.round(500 - data.lateStart.leadingDelaySec * 1000);
-      sendCatLog(`[JTCAT] Late-start TX: truncated waveform ${before}→${data.samples.length} samples (skipped ${data.lateStart.playOffsetSec.toFixed(2)}s of leading symbols), tail preserved so PTT-off stays on time; routes prepend ${500 - data.offsetMs}ms PTT settle`);
-    }
     const smartSdrDirectTxOk = settings.audioSource === 'smartsdr' &&
                                smartSdrAudio &&
                                smartSdrAudio.connected &&
@@ -41117,7 +41161,7 @@ function tuneRadio(freqKhz, mode, brng, { clearXit, origin, purpose } = {}) {
         if (window && !window.isDestroyed()) window.webContents.send('tune-blocked', reason);
       }
     };
-    if (tciTestRadio) tciTestRadio.tune(freqHz, mode, settings.jtcatUseDataMode !== false).then(reportTune);
+    if (tciTestRadio) tciTestRadio.tune(freqHz, mode, true).then(reportTune);
     else reportTune('The TCI server is disconnected');
     return;
   }
@@ -53656,7 +53700,7 @@ function cloudShackNotice(text, kind) {
     settings.jtcatLateStartTx = !!enabled;
     saveSettings(settings);
     if (ft8Engine && typeof ft8Engine.setLateStartTx === 'function') {
-      ft8Engine.setLateStartTx(!tciTestData && !tciRigTarget() && settings.jtcatLateStartTx);
+      ft8Engine.setLateStartTx(!tciTestData && settings.jtcatLateStartTx);
     }
   });
   ipcMain.on('jtcat-set-ap-decode', (_e, enabled) => {
