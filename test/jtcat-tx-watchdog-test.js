@@ -107,6 +107,21 @@ test('the stop uses the one halt and tells every surface why', () => {
   assert.ok(/send\('app-notice'/.test(body) && /jtcat-qso-state', \{ phase: 'error'/.test(body) && /broadcastJtcatQsoState\(\{ phase: 'error'/.test(body));
 });
 
+test('the watchdog pauses Hunt without rearming it until operator activity', () => {
+  const c = harness();
+  Object.assign(c, {
+    jtcatAutoCqMode: 'all', jtcatHuntFallbackMode: '', jtcatHuntTxPaused: false,
+    win: null, jtcatPopoutWin: null, remoteServer: null,
+    sendCatLog: () => {},
+    jtcatHaltTxNow: (_reason, opts) => { c.keptHunt = opts?.keepAuto; },
+  });
+  vm.runInContext(extract('function jtcatTxWatchdogStop(') + '\njtcatTxWatchdogStop()', c);
+  assert.strictEqual(c.keptHunt, true);
+  assert.strictEqual(c.jtcatHuntTxPaused, true);
+  vm.runInContext('jtcatNoteOperatorAtRadio()', c);
+  assert.strictEqual(c.jtcatHuntTxPaused, false);
+});
+
 test('turning TX on counts as the operator, desktop and phone', () => {
   assert.ok(/ipcMain\.on\('jtcat-enable-tx', \(_e, enabled\) => \{\s*if \(enabled\) jtcatNoteOperatorAtRadio\(\);/.test(MAIN));
   assert.ok(/remoteServer\.on\('jtcat-enable-tx', \(\{ enabled \}\) => \{\s*if \(enabled\) jtcatNoteOperatorAtRadio\(\);/.test(MAIN));

@@ -18933,7 +18933,7 @@ function setJtcatHuntMode(mode, owner) {
   // restamp it (that would let the loop transmit forever), which means without
   // this the clock would still read 0 and the watchdog would kill the very
   // first fallback CQ as a 30-minute timeout.
-  if (m !== 'off') jtcatFullAutoCqLastActivity = Date.now();
+  if (m !== 'off') jtcatNoteOperatorAtRadio();
   // The carousel only turns while Hunt or Run is on, and the toggle's own log
   // line is usually long before the bug report's recording window: restate
   // it here, where the automatic operation the hop rides on actually starts.
@@ -18984,7 +18984,10 @@ function jtcatHuntFallbackResume(count) {
  * Hunt→Run fallback, re-armed CQs) must NOT call this — that is the Part 97
  * line the watchdog holds.
  */
+let jtcatHuntTxPaused = false;
+
 function jtcatNoteOperatorAtRadio() {
+  jtcatHuntTxPaused = false;
   jtcatFullAutoCqLastActivity = Date.now();
 }
 
@@ -19007,8 +19010,15 @@ function jtcatTxWatchdogTripped(mode) {
 
 function jtcatTxWatchdogStop() {
   const mins = Math.round(JTCAT_TX_WATCHDOG_MS / 60000);
-  const why = `TX watchdog: ${mins} minutes of transmitting with no answer and nothing from the operator. TX stopped. Call CQ or reply again to carry on.`;
-  jtcatHaltTxNow('TX watchdog');
+  const keepHunt = jtcatAutoCqMode !== 'off' && !jtcatFullAutoCq && !jtcatHuntFallbackMode;
+  const why = `TX watchdog: ${mins} minutes with no reply or operator activity. ` +
+    (keepHunt ? 'Hunt paused. Select your Hunt mode again to resume.' : 'TX stopped. Call CQ or reply again to carry on.');
+  if (keepHunt) {
+    jtcatHuntTxPaused = true;
+    jtcatHaltTxNow('TX watchdog', { keepAuto: true });
+  } else {
+    jtcatHaltTxNow('TX watchdog');
+  }
   _jtcatTxWatchArmedAt = 0;
   if (win && !win.isDestroyed()) win.webContents.send('app-notice', { message: why, warn: true, duration: 12000 });
   if (jtcatPopoutWin && !jtcatPopoutWin.isDestroyed()) jtcatPopoutWin.webContents.send('jtcat-qso-state', { phase: 'error', error: why });
@@ -20305,7 +20315,9 @@ function jtcatHandleRetryStall(o) {
     }
   }
 
-  const maxQso = jtcatMaxQsoRetries();
+  // A hunt opener can move on sooner while the attended TX window is still open.
+  const maxQso = o.mode === 'FT8' && qso.huntOpener && qso.phase === 'reply'
+    ? Math.min(6, jtcatMaxQsoRetries()) : jtcatMaxQsoRetries();
   const outcome = _jtcatStateMachine.decideRetryOutcome({
     phase: qso.phase, txRetries: qso.txRetries,
     maxCq: JTCAT_MAX_CQ_RETRIES, maxQso,
@@ -21113,7 +21125,7 @@ function startJtcat(mode) {
 
     // --- Auto-CQ Response ---
     // Only trigger when no active QSO is running and auto mode is enabled
-    if (jtcatAutoCqMode !== 'off' && !popoutJtcatQso && !remoteJtcatQso) {
+    if (jtcatAutoCqMode !== 'off' && !jtcatHuntTxPaused && !popoutJtcatQso && !remoteJtcatQso) {
       const myCall = onAirCall();
       const myGrid = (settings.grid || '').toUpperCase().substring(0, 4);
       if (myCall && myGrid && ft8Engine && !jtcatSwrLatchBlocksHunt()) {
@@ -21173,6 +21185,7 @@ function startJtcat(mode) {
             mode: 'reply',
             phase: 'reply',
             call: best.call,
+            huntOpener: true,
             grid: best.grid,
             myCall,
             myGrid,
