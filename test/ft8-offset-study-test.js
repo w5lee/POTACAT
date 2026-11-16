@@ -46,9 +46,7 @@ test('a stale baseline is skipped and a dial change drops history and pending sc
 });
 
 const { Ft8RetryStudy } = require('../lib/ft8-retry-study');
-function retryTrial() {
-  const log = [];
-  const study = new Ft8RetryStudy(row => log.push(row), () => {});
+function retryTrial(log = [], study = new Ft8RetryStudy(row => log.push(row), () => {})) {
   const qso = { mode: 'reply', phase: 'reply', myCall: 'W5LEE', call: 'K1ABC' };
   const tx = { dialHz: 7_074_000, offsetHz: 1500, slot: 'even', peakWatts: 6 };
   for (const periodStartMs of [0, 30_000, 60_000]) {
@@ -64,10 +62,9 @@ test('skips one TX slot and keeps the same trial when overlap warrants a move', 
   assert.equal(study.defer(qso, listen), true);
   assert.equal(study.defer(qso, listen), true);
   let nextHz;
-  study.observe(qso, { ...listen, results: [{ df: 1500 }] }, (previousHz, hz) => {
-    assert.equal(previousHz, 1500);
-    nextHz = hz;
-    return true;
+  study.observe(qso, { ...listen, results: [{ df: 1500 }] }, {
+    canMove: previousHz => previousHz === 1500,
+    move: hz => { nextHz = hz; return true; },
   });
   assert.equal(nextHz, 1450);
   assert.equal(study.defer(qso, { ...tx, offsetHz: nextHz, periodStartMs: 120_000 }), false);
@@ -80,9 +77,36 @@ test('skips one TX slot and keeps the same trial when overlap warrants a move', 
 test('keeps the offset if the skipped slot has no decoded overlap', () => {
   const { log, study, qso, listen } = retryTrial();
   assert.equal(study.defer(qso, listen), true);
-  study.observe(qso, { ...listen, results: [{ df: 1800 }] }, () => {
-    assert.fail('must keep the offset');
+  study.observe(qso, { ...listen, results: [{ df: 1800 }] }, {
+    canMove: () => assert.fail('must stay outside the comparison'),
+    move: () => assert.fail('must keep the offset'),
   });
   assert.equal(log.at(-1).offsetHz, 1500);
   assert.equal(log.at(-1).moved, false);
+});
+
+test('alternates only eligible overlap trials and logs reply time for the stay arm', () => {
+  const first = retryTrial();
+  function listen({ study, qso, listen }, df, canMove = true) {
+    assert.equal(study.defer(qso, listen), true);
+    study.observe(qso, { ...listen, results: [{ df }] }, {
+      canMove: () => canMove,
+      move: () => true,
+    });
+    return first.log.at(-1);
+  }
+  const next = () => retryTrial(first.log, first.study);
+  assert.equal(listen(first, 1500).arm, 'move');
+  assert.equal(listen(next(), 1800).arm, undefined);
+  assert.equal(listen(next(), 1500, false).arm, undefined);
+  const second = next();
+  const stayed = listen(second, 1500);
+  assert.equal(stayed.arm, 'stay');
+  assert.equal(stayed.offsetHz, 1500);
+  second.study.transmitted(second.qso, { ...second.tx, periodStartMs: 120_000 });
+  second.study.observe(second.qso, { ...second.tx, slot: 'odd', periodStartMs: 135_000,
+    results: [{ text: 'W5LEE K1ABC -10', db: -10 }] });
+  assert.equal(first.log.at(-1).arm, 'stay');
+  assert.equal(first.log.at(-1).replyDelayMs, 30_000);
+  assert.equal(listen(next(), 1500).arm, 'move');
 });

@@ -21163,16 +21163,18 @@ function startJtcat(mode) {
       ft8OffsetStudy.setContext(ft8Engine, _currentFreqHz);
       if (ft8OffsetStudy.observe(data)) compareFt8Offset(ft8Engine, data.slot, 'receive');
       for (const qso of [popoutJtcatQso, remoteJtcatQso]) {
-        ft8RetryStudy.observe(qso, { ...data, dialHz: _currentFreqHz }, (previousHz, hz) => {
-          if (settings.jtcatHoldTxFreq || !studyEngine._txEnabled || studyEngine._txActive
-              || studyEngine._txMessage !== qso.txMsg || studyEngine._txFreq !== previousHz) return false;
-          studyEngine.setTxFreq(hz);
-          if (studyEngine._txFreq !== hz) return false;
-          if (jtcatPopoutWin && !jtcatPopoutWin.isDestroyed()) {
-            jtcatPopoutWin.webContents.send('jtcat-tx-freq-set', { hz, mode: 'FT8' });
-          }
-          if (remoteServer?.hasClient()) remoteServer.broadcastJtcatTxStatus({ state: 'rx', txFreq: hz });
-          return true;
+        ft8RetryStudy.observe(qso, { ...data, dialHz: _currentFreqHz }, {
+          canMove: previousHz => !settings.jtcatHoldTxFreq && studyEngine._txEnabled && !studyEngine._txActive
+            && studyEngine._txMessage === qso.txMsg && studyEngine._txFreq === previousHz,
+          move: hz => {
+            studyEngine.setTxFreq(hz);
+            if (studyEngine._txFreq !== hz) return false;
+            if (jtcatPopoutWin && !jtcatPopoutWin.isDestroyed()) {
+              jtcatPopoutWin.webContents.send('jtcat-tx-freq-set', { hz, mode: 'FT8' });
+            }
+            if (remoteServer?.hasClient()) remoteServer.broadcastJtcatTxStatus({ state: 'rx', txFreq: hz });
+            return true;
+          },
         });
       }
     }
