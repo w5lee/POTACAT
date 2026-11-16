@@ -44,3 +44,45 @@ test('a stale baseline is skipped and a dial change drops history and pending sc
   receive(60_000, 'even', 1500);
   assert.equal(log.length, 1);
 });
+
+const { Ft8RetryStudy } = require('../lib/ft8-retry-study');
+function retryTrial() {
+  const log = [];
+  const study = new Ft8RetryStudy(row => log.push(row), () => {});
+  const qso = { mode: 'reply', phase: 'reply', myCall: 'W5LEE', call: 'K1ABC' };
+  const tx = { dialHz: 7_074_000, offsetHz: 1500, slot: 'even', peakWatts: 6 };
+  for (const periodStartMs of [0, 30_000, 60_000]) {
+    study.transmitted(qso, { ...tx, periodStartMs });
+    study.observe(qso, { ...tx, slot: 'odd', periodStartMs: periodStartMs + 15_000, results: [] });
+  }
+  return { log, study, qso, tx, listen: { ...tx, periodStartMs: 90_000 } };
+}
+
+test('skips one TX slot and keeps the same trial when overlap warrants a move', () => {
+  const { log, study, qso, tx, listen } = retryTrial();
+  assert.equal(study.defer(qso, { ...listen, hold: true }), false);
+  assert.equal(study.defer(qso, listen), true);
+  assert.equal(study.defer(qso, listen), true);
+  let nextHz;
+  study.observe(qso, { ...listen, results: [{ df: 1500 }] }, (previousHz, hz) => {
+    assert.equal(previousHz, 1500);
+    nextHz = hz;
+    return true;
+  });
+  assert.equal(nextHz, 1450);
+  assert.equal(study.defer(qso, { ...tx, offsetHz: nextHz, periodStartMs: 120_000 }), false);
+  study.transmitted(qso, { ...tx, offsetHz: nextHz, periodStartMs: 120_000 });
+  assert.equal(log.at(-1).id, log[0].id);
+  assert.equal(log.at(-1).attempts, 4);
+  assert.equal(log.filter(row => row.event === 'retry-listen').length, 1);
+});
+
+test('keeps the offset if the skipped slot has no decoded overlap', () => {
+  const { log, study, qso, listen } = retryTrial();
+  assert.equal(study.defer(qso, listen), true);
+  study.observe(qso, { ...listen, results: [{ df: 1800 }] }, () => {
+    assert.fail('must keep the offset');
+  });
+  assert.equal(log.at(-1).offsetHz, 1500);
+  assert.equal(log.at(-1).moved, false);
+});
