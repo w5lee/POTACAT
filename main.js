@@ -47790,11 +47790,11 @@ function cloudShackNotice(text, kind) {
   }
 
   let lotwUploadInProgress = false;
-  async function uploadLotw(opts) {
+  async function uploadLotw(opts, automatic = false) {
     if (lotwUploadInProgress) return { ok: false, message: 'A LoTW upload is already in progress.' };
     lotwUploadInProgress = true;
     try {
-      return await uploadLotwBatches(opts);
+      return await uploadLotwBatches(opts, automatic);
     } finally {
       lotwUploadInProgress = false;
     }
@@ -47802,7 +47802,8 @@ function cloudShackNotice(text, kind) {
 
   ipcMain.handle('lotw-upload', (_e, opts) => uploadLotw(opts));
 
-  async function uploadLotwBatches(opts) {
+  async function uploadLotwBatches(opts, automatic) {
+    const operatorSettings = settings;
     const { findTqsl, buildTqslArgs, mapTqslExit, TQSL_SETTING_PLACE } = require('./lib/tqsl');
     const { buildActivationTqslArgs, batchAdif } = require('./lib/lotw-split');
     // Live field values from the Settings dialog win over saved settings so
@@ -47822,6 +47823,12 @@ function cloudShackNotice(text, kind) {
     // Station Location, so a park's grid and state come from its own records
     // and never from the home location (lib/lotw-split.js). Blank grid/state
     // are filled from the park list the same way saveQsoRecord fills them.
+    if (automatic) {
+      allQsos = allQsos.filter((qso) =>
+        String(qso.LOTW_QSL_SENT || '').toUpperCase() !== 'Y'
+        && String(qso.LOTW_QSL_RCVD || '').toUpperCase() !== 'Y');
+      if (!allQsos.length) return null;
+    }
     const { home, activations } = splitLotwLog(allQsos);
     const runs = [];
     if (home.length) runs.push({ label: 'Home', records: home, args: (p) => buildTqslArgs({ location, adifPath: p, password }) });
@@ -47829,27 +47836,34 @@ function cloudShackNotice(text, kind) {
       if (b.skip) continue;
       runs.push({ label: b.label, records: b.records, args: (p) => buildActivationTqslArgs({ call: b.call, adifPath: p, password }) });
     }
+    if (automatic) {
+      operatorSettings.lastLotwAutoUploadAttemptAt = Date.now();
+      saveSettings(operatorSettings);
+    }
     const held = activations.filter((b) => b.skip);
     for (const b of held) sendCatLog(`[LoTW] Activation ${b.label}: ${b.records.length} QSO${b.records.length === 1 ? '' : 's'} not uploaded — ${b.skip}`);
     if (!runs.length) {
+      if (automatic) return null;
       return { ok: false, message: held.length ? `Nothing could be uploaded: ${held.map((b) => `${b.label}: ${b.skip}`).join('; ')}.` : 'No QSOs in the log to upload.' };
     }
     if (activations.length) {
       sendCatLog(`[LoTW] Uploading in ${runs.length} part${runs.length === 1 ? '' : 's'}: ${runs.map((x) => `${x.label} (${x.records.length})`).join(', ')}`);
     }
+    const sameLog = () => settings.activeProfile === operatorSettings.activeProfile && qsoLogPath() === logPath;
     const done = [];
     for (let i = 0; i < runs.length; i++) {
+      if (automatic && (!sameLog() || !settings.lotwEnable)) break;
       const run = runs[i];
       const snap = path.join(app.getPath('userData'), `lotw-upload-${i}.adi`);
       fs.writeFileSync(snap, batchAdif(run.records), 'utf-8');
-      const res = await runLotwBatch(tqsl, run.args(snap), snap, password, mapTqslExit, run.label);
+      const res = await runLotwBatch(tqsl, run.args(snap), snap, password, mapTqslExit, run.label, logPath, operatorSettings);
       try { fs.unlinkSync(snap); } catch { /* best effort */ }
       done.push({ run, res });
       // A failed run (wrong password, no network, LoTW down) fails the same
       // way for every batch after it — stop instead of repeating it.
       if (!res.r.ok) break;
     }
-    if (done.some((d) => d.res.r.ok)) {
+    if (sameLog() && done.some((d) => d.res.r.ok)) {
       settings.lastLotwUploadAt = Date.now();
       saveSettings(settings);
     }
@@ -47869,6 +47883,7 @@ function cloudShackNotice(text, kind) {
         notUploaded.push({ call: q.CALL, date: q.QSO_DATE, time: q.TIME_ON || '', station: b.call, reason: `Activation ${b.ref} not uploaded`, detail: b.skip });
       }
     }
+    if (!done.length) return null;
     let r;
     if (done.length === 1 && !activations.length) {
       // Home only: the message reads exactly as before.
@@ -47901,67 +47916,24 @@ function cloudShackNotice(text, kind) {
   }
 
   const LOTW_DAILY_INTERVAL = 24 * 60 * 60 * 1000;
-  let lotwReminderOpen = false;
-  async function checkLotwUploadReminder() {
-    if (!settings.lotwEnable || !settings.lotwUploadReminder || !settings.lotwStationLocation
-        || isRemoteMode() || activationRunning() || lotwUploadInProgress || lotwReminderOpen
-        || !win || win.isDestroyed() || !win.isFocused()) return;
-    const now = Date.now();
-    if (now - Math.max(settings.lastLotwReminderAt || 0, settings.lastLotwUploadAt || 0)
-        < LOTW_DAILY_INTERVAL) return;
+  async function checkLotwAutoUpload() {
+    if (!settings.lotwEnable || !settings.lotwStationLocation || isRemoteMode()
+        || activationRunning() || lotwUploadInProgress) return;
+    const lastRun = Math.max(settings.lastLotwAutoUploadAttemptAt || 0, settings.lastLotwUploadAt || 0);
+    if (Date.now() - lastRun < LOTW_DAILY_INTERVAL) return;
     const { findTqsl } = require('./lib/tqsl');
-    if (!findTqsl(settings.tqslPath)) return;
-    const logPath = settings.adifLogPath || path.join(app.getPath('userData'), 'potacat_qso_log.adi');
-    if (!fs.existsSync(logPath)) return;
-    const pending = parseAllRawQsos(logPath).filter((qso) =>
-      String(qso.LOTW_QSL_SENT || '').toUpperCase() !== 'Y'
-      && String(qso.LOTW_QSL_RCVD || '').toUpperCase() !== 'Y');
-    if (!pending.length) return;
-    const { home, activations } = splitLotwLog(pending);
-    let ready = home.length;
-    let held = 0;
-    for (const batch of activations) {
-      if (batch.skip) held += batch.records.length;
-      else ready += batch.records.length;
-    }
-
-    const reminderWindow = win;
-    const reminderSettings = settings;
-    lotwReminderOpen = true;
-    try {
-      settings.lastLotwReminderAt = now;
-      saveSettings(settings);
-      const { response } = await dialog.showMessageBox(reminderWindow, {
-        type: 'question',
-        title: 'LoTW upload reminder',
-        message: ready ? `${ready} QSO${ready === 1 ? '' : 's'} ready to upload to LoTW`
-          : 'Park QSOs need location details before upload',
-        detail: held ? `${held} park QSO${held === 1 ? ' needs' : 's need'} station location details. Check the activation grid and, for U.S. parks, the state.` : '',
-        buttons: ready ? ['Upload now', 'Remind me tomorrow'] : ['Remind me tomorrow'],
-        defaultId: ready ? 1 : 0,
-        cancelId: ready ? 1 : 0,
-      });
-      if (!ready || response !== 0 || activationRunning() || !settings.lotwEnable
-          || !settings.lotwUploadReminder || settings !== reminderSettings
-          || isRemoteMode() || reminderWindow.isDestroyed()) return;
-      const result = await uploadLotw().catch((err) => ({ ok: false, message: err.message }));
-      if (!reminderWindow.isDestroyed()) await dialog.showMessageBox(reminderWindow, {
-        type: result.ok ? 'info' : 'warning',
-        title: 'LoTW upload',
-        message: result.message,
-      });
-    } finally {
-      lotwReminderOpen = false;
-    }
+    if (!findTqsl(settings.tqslPath) || !fs.existsSync(qsoLogPath())) return;
+    const result = await uploadLotw(undefined, true);
+    if (result) sendCatLog(`[LoTW] Daily upload: ${result.message}`);
   }
 
   setInterval(() => {
-    checkLotwUploadReminder().catch((err) => sendCatLog(`[LoTW] Upload reminder: ${err.message}`));
+    checkLotwAutoUpload().catch((err) => sendCatLog(`[LoTW] Daily upload: ${err.message}`));
   }, 60 * 1000).unref();
 
   // One TQSL run over one batch file: exit code → outcome, then stamp the
   // batch's QSOs as sent except the ones TQSL named as skipped.
-  function runLotwBatch(tqsl, args, snap, password, mapTqslExit, label) {
+  function runLotwBatch(tqsl, args, snap, password, mapTqslExit, label, logPath, operatorSettings) {
     sendCatLog(`[LoTW] ${label}: tqsl ${args.filter((x) => !password || x !== password).map((x) => (x === '' ? '""' : x)).join(' ')}`);
     return new Promise((resolve) => {
       const { execFile } = require('child_process');
@@ -48014,10 +47986,12 @@ function cloudShackNotice(text, kind) {
             }
             const today = new Date().toISOString().slice(0, 10).replace(/-/g, '');
             let stats;
-            mutateQsoLog((qsos) => {
+            const sink = settings.activeProfile === operatorSettings.activeProfile ? qsoLogSink
+              : logAsLogSink(operatorSettings, operatorSettings.myCallsign);
+            QsoLog.mutateLog(logPath, (qsos) => {
               stats = stampLotwSent(qsos, snapshotQsos, skips, today);
               if (!stats.stamped) return false;
-            });
+            }, { sink });
             sendCatLog(`[LoTW] ${label}: marked ${stats.stamped} QSOs as uploaded` +
               (alreadyAtLotw ? ` (${alreadyAtLotw} TQSL reported as previously signed, so already at LoTW)` : '') +
               (stats.alreadyStamped ? ` (${stats.alreadyStamped} already marked)` : '') +

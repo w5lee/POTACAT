@@ -3034,14 +3034,12 @@
             <label style="display:block;margin-top:4px;">Certificate password (only if your certificate has one):
               <input type="password" id="set-lotw-password" style="width:180px;" autocomplete="off">
             </label>
-            <label class="checkbox-label" style="margin-top:6px;">
-              <input type="checkbox" id="set-lotw-upload-reminder"> Remind me daily to upload QSOs to LoTW
-            </label>
+            <div class="help-text" style="margin-top:6px;">While POTACAT is running, new QSOs are uploaded daily. Use Upload to LoTW to send them immediately.</div>
             <div style="margin-top:8px;">
               <button type="button" id="lotw-upload-btn">Upload to LoTW</button>
               <span id="lotw-upload-result" class="help-text" style="margin-left:8px;"></span>
             </div>
-            <div class="help-text" style="margin-top:4px;line-height:1.5;">Station Locations come from TQSL (Station &gt; Add/Edit Station Locations). The upload sends your whole POTACAT log — TQSL's duplicate detection uploads only what LoTW hasn't seen.</div>
+            <div class="help-text" style="margin-top:4px;line-height:1.5;">Station Locations come from TQSL (Station &gt; Add/Edit Station Locations). The manual upload checks your whole POTACAT log — TQSL's duplicate detection uploads only what LoTW hasn't seen.</div>
             <div style="margin-top:10px;border-top:1px dashed var(--border);padding-top:8px;">
               <label>LoTW username:
                 <input type="text" id="set-lotw-login" style="width:140px;" autocomplete="off">
