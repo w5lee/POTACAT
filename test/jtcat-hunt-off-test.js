@@ -26,12 +26,12 @@ const MAIN = readSrc(path.join(__dirname, '..', 'main.js'));
 test('nothing NEW starts while hunt is off', () => {
   // The caller-selection block — CQ hunting AND answering a direct caller —
   // must sit behind the mode check, or "Off" would keep taking new QSOs.
-  assert.ok(/if \(jtcatAutoCqMode !== 'off' && !popoutJtcatQso && !remoteJtcatQso\) \{/.test(MAIN),
+  assert.ok(/if \(jtcatAutoCqMode !== 'off' && !jtcatHuntTxPaused && !popoutJtcatQso && !remoteJtcatQso\) \{/.test(MAIN),
     'the auto-CQ response guard changed shape');
 });
 
 test('answering a DIRECT caller is inside that same guard', () => {
-  const guard = MAIN.indexOf("if (jtcatAutoCqMode !== 'off' && !popoutJtcatQso && !remoteJtcatQso) {");
+  const guard = MAIN.indexOf("if (jtcatAutoCqMode !== 'off' && !jtcatHuntTxPaused && !popoutJtcatQso && !remoteJtcatQso) {");
   assert.notStrictEqual(guard, -1);
   const call = MAIN.indexOf('jtcatTryAnswerDirectCaller(results, myCall, myGrid)', guard);
   assert.notStrictEqual(call, -1, 'direct-caller answering moved out of the guard');
