@@ -17516,6 +17516,16 @@ let jtcatQuietFreq = 1500; // auto-detected quiet TX frequency from FFT analysis
 const { Ft8OffsetStudy } = require('./lib/ft8-offset-study');
 const ft8OffsetStudy = new Ft8OffsetStudy(row =>
   appendDiagnosticLog('ft8-offset-study.log', JSON.stringify(row)));
+const { Ft8RetryStudy } = require('./lib/ft8-retry-study');
+const ft8RetryStudy = new Ft8RetryStudy(
+  row => appendDiagnosticLog('ft8-offset-study.log', JSON.stringify(row)),
+  (qso, message, sub) => {
+    if (qso === popoutJtcatQso && jtcatPopoutWin && !jtcatPopoutWin.isDestroyed()) {
+      jtcatPopoutWin.webContents.send('jtcat-qso-notice', { message, sub });
+    } else if (win && !win.isDestroyed()) {
+      win.webContents.send('app-notice', { message: `${message}. ${sub}`, duration: 6000 });
+    }
+  });
 let ft8StudyBaseline = null;
 
 function compareFt8Offset(engine, slot, kind) {
@@ -21125,6 +21135,8 @@ function startJtcat(mode) {
     if (data.mode === 'FT8' && _currentFreqHz && !_fakeIt.active && !_fakeIt.restorePending) {
       ft8OffsetStudy.setContext(ft8Engine, _currentFreqHz);
       if (ft8OffsetStudy.observe(data)) compareFt8Offset(ft8Engine, data.slot, 'receive');
+      ft8RetryStudy.observe(popoutJtcatQso, { ...data, dialHz: _currentFreqHz });
+      ft8RetryStudy.observe(remoteJtcatQso, { ...data, dialHz: _currentFreqHz });
     }
     // Enrich decodes with "needed" flags for call roster
     if (data.results) {
@@ -21719,7 +21731,13 @@ function startJtcat(mode) {
       // Capture the one whose message is actually in this waveform.
       const qso = [popoutJtcatQso, remoteJtcatQso].find(q => q && q.txMsg === data.message);
       const rig = activeQsoRig();
+      const periodStartMs = Math.floor(StationClock.now() / 15_000) * 15_000;
       const reason = tciTestRadio.startTx(waveform, expectedDial, (result, peakWatts) => {
+        if (result === 'complete' && mode === 'FT8' && qso?.txMsg === data.message
+            && (qso === popoutJtcatQso || qso === remoteJtcatQso)) {
+          ft8RetryStudy.transmitted(qso, { dialHz: expectedDial, slot: data.slot,
+            offsetHz: data.freq, periodStartMs, peakWatts });
+        }
         finishTciJtcatTx(engine, qso, data.message, result, peakWatts, rig);
       });
       if (reason) { deny(reason); return; }
