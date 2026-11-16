@@ -31,22 +31,17 @@ function _appendStartupLog(line) {
       try { dir = require('electron').app.getPath('userData'); }
       catch { dir = require('os').tmpdir(); }
       try { fsx.mkdirSync(dir, { recursive: true }); } catch {}
-      _startupLogPath = require('path').join(dir, 'startup.log');
-      // Keep the previous launch's copy: a [FATAL] stack from a crash is
-      // useless if the relaunch that reports the bug truncates it first
+      // Rotation and the clean-exit marker live in lib/clean-exit-marker.js,
+      // evaluated ONCE per launch (this block runs before anything else can
+      // fail). Keep the previous launch's copy: a [FATAL] stack from a crash
+      // is useless if the relaunch that reports the bug truncates it first
       // (the ARRL 250 crash report arrived with a healthy startup.log for
-      // exactly this reason).
-      try { if (fsx.existsSync(_startupLogPath)) fsx.copyFileSync(_startupLogPath, _startupLogPath + '.old'); } catch {}
-      // Clean-exit marker, evaluated ONCE per launch beside the log rotation
-      // (this block runs before anything else can fail).
-      try {
-        _cleanExitMarkerPath = require('path').join(dir, 'clean-exit');
-        if (fsx.existsSync(_cleanExitMarkerPath)) {
-          fsx.unlinkSync(_cleanExitMarkerPath); // absent for the whole run
-        } else {
-          _prevRunUnclean = true;
-        }
-      } catch { /* marker is diagnostic only — never block startup */ }
+      // exactly this reason). A side mode (--launcher, --print-cert-fingerprint)
+      // writes its own log and never touches the marker (#550).
+      const prep = CleanExitMarker.prepareStartupLog({ dir, argv: process.argv, fs: fsx });
+      _startupLogPath = prep.logPath;
+      _cleanExitMarkerPath = prep.markerPath;
+      _prevRunUnclean = prep.prevRunUnclean;
       // Fresh file per launch, with an identity header for bug reports.
       const os = require('os');
       let ver = '?';
@@ -91,6 +86,9 @@ const { app, BrowserWindow, ipcMain, Menu, dialog, Notification, screen, nativeI
 // Outbound fetch never offers Brotli (CVE-2026-111497; Electron 39 carries
 // no fixed Node). Installed before any module that fetches is loaded.
 require('./lib/fetch-policy').installNoBrotliFetch(globalThis);
+// Startup-log rotation and the clean-exit marker (#550). Required here, after
+// the fetch policy; _appendStartupLog above first runs below this line.
+const CleanExitMarker = require('./lib/clean-exit-marker');
 const FreqDots = require('./lib/freq-dots'); // display only: 14.074.00 MHz, the VFO way
 const RemoteBridge = require('./lib/remote-bridge');
 const WaterfallPalettes = require('./lib/waterfall-palettes');
@@ -420,6 +418,7 @@ const { TcpTransport, SerialTransport, calloutTwin } = require('./lib/transport'
 const { RsBa1Transport } = require('./lib/rsba1-transport');
 const { Sculan10Transport } = require('./lib/sculan10-transport');
 const Sculan10 = require('./lib/sculan10-protocol');
+const YaesuLanTx = require('./lib/yaesu-lan-tx');
 const { KenwoodCodec } = require('./lib/codecs/kenwood-codec');
 const { YaesuLegacyCodec } = require('./lib/codecs/yaesu-legacy-codec');
 const { RigctldCodec } = require('./lib/codecs/rigctld-codec');
@@ -439,6 +438,7 @@ const ActivationMapData = require('./lib/activation-map-data');
 const LogFreq = require('./lib/log-freq');
 const LogTxPower = require('./lib/log-tx-power'); // the power a contact is logged at, never a guessed 100 W (#523)
 const RigBands = require('./lib/rig-bands');
+const SpotBandFilter = require('./lib/spot-band-filter');
 const SstvStartBand = require('./lib/sstv-start-band');
 const AwardTables = require('./lib/award-tables');
 const { activationStationFill } = require('./lib/activation-station'); // N7VBN: station side of activation records
@@ -481,6 +481,7 @@ const ClusterNodeChoice = require('./lib/cluster-node-choice'); // turn saved cl
 const { parseAdifFile, parseWorkedQsos, parseAllQsos, parseAllRawQsos, parseAdifStream, parseSqliteFile, parseSqliteConfirmed, isSqliteFile, parseRecord: parseAdifRecord, normalizeMode: normalizeLogMode } = require('./lib/adif');
 const { qsoDayInScheduleEntry, matchChecklistItem, matchRegionPatterns, activeScheduleEntry, coveringScheduleEntries, matchingRegionEntry, matchEventQsoForStamp, retroStampMatches, retroCorrectStamps } = require('./lib/event-progress');
 const { cwPaddleAvailability } = require('./lib/cw-paddle-availability');
+const { txrxPttOnlyHint } = require('./lib/cw-paddle-hint');
 const { resolveCwKeyPins, resolveKeyPortPins, keyLineLabel } = require('./lib/cw-key-line');
 const { buildPersistentKeyerScript } = require('./lib/cw-keyer-script');
 const { cwTextUnavailablePlan } = require('./lib/cw-text-fallback');
@@ -495,10 +496,12 @@ const ScopeOverlay = require('./lib/scope-overlay');
 const { explainRigctldFailure } = require('./lib/rigctld-stderr');
 const RigFamily = require('./lib/rig-family');
 const RigFullPower = require('./lib/rig-full-power');
+const TxAudioInput = require('./lib/tx-audio-input'); // Kenwood TX; vs TX1; per rig (#594)
+const AmpDrive = require('./lib/amp-drive-limit'); // per-rig amplifier drive limit (B10 row 10)
 const { decideBandPowerReapply } = require('./lib/band-power-reapply');
 const AtuWizard = require('./lib/atu-wizard');
 const AppTheme = require('./lib/app-theme');
-const { stripSecrets, restoreSecrets } = require('./lib/settings-secrets');
+const { stripSecrets, restoreSecrets, stripSdrUserinfo, sdrUserinfo } = require('./lib/settings-secrets');
 const { buildContestHistory } = require('./lib/contest-history');
 const contestsDb = require('./lib/contests-db');
 const { ContestsFeed } = require('./lib/contests-feed');
@@ -598,6 +601,7 @@ const { PskrClient } = require('./lib/pskreporter');
 const PskrTx = require('./lib/pskreporter-tx');
 const { Ft8Engine, freqsForMode } = require('./lib/ft8-engine');
 const DialSnap = require('./lib/dial-snap');
+const PlainSsbForDigital = require('./lib/plain-ssb-for-digital');
 const { decideDialFollow } = require('./lib/jtcat-dial-follow');
 const JtcatRxSource = require('./lib/jtcat-rx-source'); // #243: JTCAT can hear a WebSDR instead of the radio
 const { StreamResampler } = require('./lib/stream-resampler');
@@ -761,7 +765,7 @@ function parkInfoFor(ref) {
 // DXNews + NG3K, refreshed server-side every 6h. See README in that
 // worker for the schema served at /feeds/dxpeditions.json.
 const { getModel, getModelList, RIG_MODELS } = require('./lib/rig-models');
-const { resolveSetupNotes, radioTypeFromCatTarget, TCI_TEST_SETUP } = require('./lib/rig-setup-notes');
+const { resolveSetupNotes, radioTypeFromCatTarget, icomScopeBaudAction, TCI_TEST_SETUP } = require('./lib/rig-setup-notes');
 const StationSetup = require('./lib/station-setup');
 const ReviewAsk = require('./lib/review-ask'); // one-time "Rate ECHOCAT" card
 const SetupShare = require('./lib/setup-share');
@@ -1890,6 +1894,15 @@ let sstvManager = null;      // SSTV multi-slice manager
 let openSstvPopout = null;   // function — assigned in second whenReady block
 let startSstv = null;        // function — assigned in second whenReady block (same reason)
 let openJtcatPopout = null;  // function — assigned in second whenReady block (used by WSPR-on-idle)
+// Every "Open folder" button: make the folder, open it, and hand the window a
+// plain-words failure instead of doing nothing (#546, lib/open-folder.js).
+const OpenFolder = require('./lib/open-folder');
+async function openFolderLogged(dir, label, tag) {
+  const r = await OpenFolder.openFolder(dir, { fsp: fs.promises, shell: require('electron').shell, label });
+  if (!r.ok) sendCatLog(`[${tag}] Open folder failed: ${r.error}`);
+  else if (r.created) sendCatLog(`[${tag}] Made the missing ${label} ${r.dir}`);
+  return r;
+}
 function defaultSstvGalleryDir() {
   return path.join(app.getPath('pictures'), 'POTACAT', 'SSTV-RX');
 }
@@ -2052,6 +2065,9 @@ let _winlinkTxFailsafeTimer = null;
 let _winlinkCapTimer = null;
 let _winlinkWatchdog = null;
 let _winlinkLastActivity = 0;
+// A session started while a Guest Pass guest had the radio is the guest's:
+// its traffic is never the owner's activity (#200 step 4).
+let _winlinkSessionByGuest = false;
 let _winlinkSessionError = '';
 let _winlinkSessionErrorKind = '';   // 'login-failed' | 'no-answer' | 'transport-down' | 'rig-refused' | 'stopped' | '' — session.errorKind for clients
 // How this session ended, as facts for lib/winlink-outcome.js (#425). The
@@ -2257,6 +2273,30 @@ function onRemoteServer(fn) {
   _remoteServerHooks.push(fn);
   if (remoteServer) fn(remoteServer);
 }
+// Guest Pass hand-back rule (#200 step 4): the owner used the radio at the
+// station. kind is one of lib/pass-owner-activity.js KINDS; remote-server
+// ignores it unless the owner holds a guest's radio. The idle-receive
+// session drives the radio itself and is not the owner.
+function noteOwnerActivity(kind) {
+  if (autoIdleJtcatActive || autoIdleJs8Active) return;
+  if (remoteServer && remoteServer.noteOwnerActivity) { try { remoteServer.noteOwnerActivity(kind); } catch { /* never in the way of the radio */ } }
+}
+// Once per idle offer (the guest was just told the radio is free): ask Cloud
+// to push the same news to the guest's phone, which may be closed (#541,
+// lib/pass-radio-free-notify.js). Signed-in owner only; one call, never retried.
+// session: {code, call, sessionId, offeredAt}.
+const radioFreeNotifier = require('./lib/pass-radio-free-notify').createRadioFreeNotifier({
+  getRequest: () => (cloudIpc && cloudIpc.currentOwnerId() ? (m, p, b) => cloudIpc.getCloudSync()._authedRequest(m, p, b) : null),
+});
+function onOwnerIdleOffered(session) {
+  radioFreeNotifier.notify(session)
+    .then((r) => sendCatLog(require('./lib/pass-radio-free-notify').describeOutcome(r)))
+    .catch(() => { /* never in the way of the radio */ });
+}
+// The radio's own word that it is transmitting (CAT TX status, forward
+// power), debounced to 1 s: the owner on the hand mic at the radio is using
+// it (#200 step 4). Counts only while the owner holds a lent radio.
+const _radioTxWatch = require('./lib/pass-owner-activity').createRadioTxWatch({ onActive: (kind) => noteOwnerActivity(kind) });
 // Active ALSA capture sessions (Linux raw hw:/plughw: devices). Assigned in the
 // ipcMain handler block below; declared here at module scope so gracefulCleanup()
 // can stop every session on quit. If left running, each session's setInterval
@@ -2352,6 +2392,7 @@ const ExtAtuRestore = require('./lib/ext-atu-restore');
 const PowerRestore = require('./lib/power-restore');
 const { withTimeout } = require('./lib/with-timeout');
 const SerialHsTrial = require('./lib/serial-hs-trial');
+const PttFlowConflict = require('./lib/ptt-flow-conflict'); // #544: PTT on RTS + RTS/CTS on one port
 const IdleWsprBand = require('./lib/idle-wspr-band');
 const SetupTestFreq = require('./lib/setup-test-freq');
 const HuntFilters = require('./lib/jtcat-hunt-filters');
@@ -2556,7 +2597,7 @@ function voiceTxCheckEnd() {
   if (!c) return;
   const model = getActiveRigModel() || {};
   const d = decideVoiceTxHint({ keyedMs: Date.now() - c.startedAt, fwdEvents: c.fwdEvents, peakW: c.peakW,
-    alcEvents: c.alcEvents, peakAlc: c.peakAlc, mode: c.mode || _currentMode, brand: model.brand });
+    alcEvents: c.alcEvents, peakAlc: c.peakAlc, mode: c.mode || _currentMode, brand: model.brand, model: getActiveRigModelName() });
   if (!d) return;
   const k = (settings.activeRigId || '') + '|' + d.key;
   if (_voiceTxHinted.has(k)) return;
@@ -3452,12 +3493,33 @@ function noCatBandNote(mhz) {
 // (lib/rig-full-power.js, W5LEE's 5 W Hermes Lite behind deskHPSDR's 100 W
 // TS-2000 emulation). One wrapper, so every return path below gets it: the
 // codecs, the power sliders, the caps and the logged TX power agree.
+// The active rig's amplifier drive limit, read by the radio clients on every
+// power command (lib/amp-drive-limit.js). Read live, so a rig switch or a
+// rig-editor save applies to the next command.
+function activeAmpDriveLimitW() {
+  if (!settings) return 0;
+  const r = (settings.rigs || []).find(x => x && x.id === settings.activeRigId);
+  return AmpDrive.limitW(r);
+}
+AmpDrive.setLimitSource(() => {
+  const watts = activeAmpDriveLimitW();
+  if (!watts) return { watts: 0, fullW: 0 };
+  let fullW = 0;
+  try { const m = getActiveRigModel(); fullW = m && Number(m.maxPower) > 0 ? Number(m.maxPower) : 0; } catch { fullW = 0; }
+  return { watts, fullW };
+});
+
 function getActiveRigModel() {
   const activeRig = (settings.rigs || []).find(r => r && r.id === settings.activeRigId);
   return RigFullPower.applyFullPower(_activeRigModelBase(), activeRig);
 }
 
+// The rig's transmit audio input sets the Kenwood key-down, TX; or TX1; (#594).
 function _activeRigModelBase() {
+  const r = (settings.rigs || []).find(x => x && x.id === settings.activeRigId);
+  return TxAudioInput.applyToModel(_activeRigModelPicked(), r, r && r.model);
+}
+function _activeRigModelPicked() {
   const activeRig = (settings.rigs || []).find(r => r.id === settings.activeRigId);
   const modelName = activeRig?.model || null;
   const rigType = detectRigType();
@@ -3613,6 +3675,22 @@ function getRigCapabilities(rigType) {
   caps.afgain = rigSupportsAfGain(rigType);
   // The bands this radio is used on (null = not restricted), lib/rig-bands.js.
   caps.bands = activeRigBands();
+  // #293: Power Off only where POTACAT can switch the radio back on (an
+  // SCU-LAN10), or where the operator allowed it for this rig. Every client
+  // hides Power Off on false, and main refuses it (lib/rig-power.js).
+  if (caps.power) {
+    caps.powerOff = RigPower.powerOffAvailable(caps, {
+      linkType: settings.catTarget && settings.catTarget.type,
+      allowOffNoWake: !!(activeRig && activeRig.allowPowerOffNoWake),
+    });
+  }
+  // The rig's amplifier drive limit: every power slider stops there.
+  const ampLimitW = AmpDrive.limitW(activeRig);
+  if (ampLimitW > 0) {
+    caps.ampDriveLimitW = ampLimitW;
+    caps.maxPower = caps.maxPower != null ? Math.min(Number(caps.maxPower) || ampLimitW, ampLimitW) : ampLimitW;
+    if (caps.minPower != null && Number(caps.minPower) > caps.maxPower) caps.minPower = caps.maxPower;
+  }
   return caps;
 }
 
@@ -4984,6 +5062,7 @@ function remoteMeterPush(type, value) {
 
 function sendCatFwdPower(watts) {
   noteMeterSeen('power');
+  if (!isRemoteMode()) _radioTxWatch.fwd(Number(watts) || 0);
   const w = Math.round((Number(watts) || 0) * 10) / 10;
   if (_stationSetupTxTest) {
     _stationSetupTxTest.fwdEvents++;
@@ -5010,6 +5089,22 @@ function sendCatFwdPower(watts) {
   _fwdPowerClearTimer = setTimeout(() => { _fwdPowerClearTimer = null; _fwdPowerHold.reset(); push(0); }, 3000);
 }
 
+// The radio reports a power above the rig's amplifier drive limit (set on its
+// front panel, by SmartSDR, or found that way on connect): set it down to the
+// limit and say so. At most once every 3 s, so a radio that refuses cannot
+// start a loop. This computer's own radio only, never a remote shack's.
+let _ampDriveGuardAt = 0;
+function ampDriveReadbackGuard(watts) {
+  if (isRemoteMode()) return;
+  const lim = activeAmpDriveLimitW();
+  if (!AmpDrive.overLimit(watts, lim)) return;
+  const now = Date.now();
+  if (now - _ampDriveGuardAt < 3000) return;
+  _ampDriveGuardAt = now;
+  sendCatLog(`[Amp] The radio reports ${watts} W, above this rig's amplifier drive limit of ${lim} W: setting ${lim} W`);
+  try { setRadioTxPowerRaw(lim); } catch (e) { sendCatLog(`[Amp] Could not set ${lim} W: ${e.message}`); }
+}
+
 function sendCatPower(watts) {
   if (win && !win.isDestroyed()) win.webContents.send('cat-power', watts);
   if (vfoPopoutWin && !vfoPopoutWin.isDestroyed()) vfoPopoutWin.webContents.send('cat-power', watts);
@@ -5017,6 +5112,7 @@ function sendCatPower(watts) {
   _currentTxPower = watts;
   _currentPower = watts;
   broadcastRigState();
+  ampDriveReadbackGuard(watts);
   // A stale WSPR pre-beacon marker with the radio still at the 1 W cap is a
   // restore that never landed — this readback is where it gets put back.
   if (!isRemoteMode()) wsprReconcilePreCapPower(watts);
@@ -5256,6 +5352,7 @@ function setRadioTxPowerRaw(watts) {
   let max = 0;
   try { const m = getActiveRigModel(); max = m && Number(m.maxPower) > 0 ? Number(m.maxPower) : 0; } catch { max = 0; }
   if (max && w > max) w = max;
+  w = AmpDrive.clampW(w, activeAmpDriveLimitW()); // the rig's amplifier drive limit
   const rigType = detectRigType();
   if (rigType === 'flex') {
     if (!smartSdr || !smartSdr.connected) return false;
@@ -5396,6 +5493,10 @@ function txMetersRestOnRx() {
 
 function sendCatAlc(val) {
   if (typeof val === 'number' && Number.isFinite(val)) noteMeterSeen('alc');
+  if (_stationSetupTxTest && typeof val === 'number' && Number.isFinite(val)) {
+    _stationSetupTxTest.alcEvents++;
+    if (val > _stationSetupTxTest.peakAlc) _stationSetupTxTest.peakAlc = val;
+  }
   if (_voiceTxCheck && typeof val === 'number' && Number.isFinite(val)) {
     _voiceTxCheck.alcEvents++;
     if (val > _voiceTxCheck.peakAlc) _voiceTxCheck.peakAlc = val;
@@ -6100,6 +6201,21 @@ function activeRigBands() {
   return out.length ? out : base;
 }
 
+/**
+ * ECHOCAT's band filter (settings.echoFilters, phone and ECHOCAT Web) re-ticked
+ * for the radio now active: its bands minus the operator's off list, or All
+ * (#291, lib/spot-band-filter.js). Saved and pushed to every client.
+ */
+function echoFiltersFollowRig(prevBands, bands) {
+  const next = SpotBandFilter.followRig(settings.echoFilters, prevBands, bands);
+  if (!next) return;
+  settings.echoFilters = next;
+  saveSettings(settings);
+  if (remoteServer && remoteServer.running) {
+    remoteServer.sendFiltersToClient({ ...next, muteRules: normalizeMuteRules(settings.spotMuteRules) });
+  }
+}
+
 let _rigBandsLastSent = '';
 /** Push the active rig's bands to every window and ECHOCAT client (deduped). */
 function rigBandsBroadcast(force) {
@@ -6107,6 +6223,7 @@ function rigBandsBroadcast(force) {
   const key = JSON.stringify(bands);
   if (!force && key === _rigBandsLastSent) return;
   const changed = key !== _rigBandsLastSent;
+  const prevBands = _rigBandsLastSent ? JSON.parse(_rigBandsLastSent) : bands;
   _rigBandsLastSent = key;
   const payload = { bands, all: RigBands.ALL_BANDS };
   for (const w of [win, jtcatPopoutWin, sstvPopoutWin, vfoPopoutWin, spotsPopoutWin, winlinkPopoutWin]) {
@@ -6118,6 +6235,7 @@ function rigBandsBroadcast(force) {
     sendCatLog(bands ? `[Rig] Bands for this radio: ${bands.join(' ')} (others are hidden everywhere; change them in the rig editor)` : '[Rig] Bands for this radio: not restricted (model not known; tick bands in the rig editor to limit them)');
     // The spot list is filtered by band, so it is rebuilt with the new set.
     try { sendMergedSpots(); } catch { /* window not ready */ }
+    try { echoFiltersFollowRig(prevBands, bands); } catch (e) { console.error('[Rig] echo filters:', e.message); }
   }
 }
 
@@ -6140,7 +6258,11 @@ let _stationSetupLaunchLastVersion;
 let _stationSetupNotifyTimer = null;
 const STATION_SETUP_TEST_TONE_HZ = 1000;
 let _stationSetupTxBusy = false;       // a test transmit is running (see runStationSetupTxTest)
-let _stationSetupTxTest = null;        // { peakW, fwdEvents, peakSwr } while a test transmit runs
+let _stationSetupTxTest = null;        // { peakW, fwdEvents, peakSwr, alcEvents, peakAlc, txSeen, startedAt } while a test transmit runs
+// The last PTT line that failed to switch on a key-down ({at, line, port, message}).
+// The error arrives by callback after gatedSetTransmit has returned true, so the
+// test transmit reads it at the end of its window (#544).
+let _pttLineError = null;
 let _lastPowerReadback = null;         // { watts, at } — the radio's own report, never our optimism
 let _setupPowerRestoreAttempt = 0;
 
@@ -6251,6 +6373,8 @@ function stationSetupLive(rig) {
     txDeviceTest: r.txDeviceTest || null,
     txTest: r.txTest || null,
     voiceTest: r.voiceTest || null,
+    // PTT on RTS with RTS/CTS flow control (or RTS held high) on the same port (#544).
+    pttConflict: PttFlowConflict.pttFlowConflict(ct, info && info.serialHandshake),
     scope,
     atu: atuWizardSetupLive(rig),
   };
@@ -6597,9 +6721,14 @@ async function _runStationSetupTxTest(rigId, { keepPower = false, voice = false 
     }
   }
 
-  _stationSetupTxTest = { peakW: 0, fwdEvents: 0, peakSwr: 0 };
+  _stationSetupTxTest = { peakW: 0, fwdEvents: 0, peakSwr: 0, alcEvents: 0, peakAlc: 0, txSeen: false, startedAt: Date.now() };
   const swrPoll = setInterval(() => {
-    if (_stationSetupTxTest && _currentSwrRatio > _stationSetupTxTest.peakSwr) _stationSetupTxTest.peakSwr = _currentSwrRatio;
+    const m = _stationSetupTxTest;
+    if (!m) return;
+    if (_currentSwrRatio > m.peakSwr) m.peakSwr = _currentSwrRatio;
+    // The radio's own TX readback (Kenwood IF / Yaesu TX), taken after the
+    // test began: evidence that it keyed, where the radio reports it (#544).
+    if (cat && cat._codecTxSeen === true && (cat._codecTxSeenAt || 0) >= m.startedAt) m.txSeen = true;
   }, 150);
   sendCatLog(`[Setup] test transmit: 3 s tone at ${keepPower ? 'the radio\'s current power' : Math.min(prevW || testW, testW) + ' W'}`);
   const tuneStartedAt = Date.now();
@@ -6647,28 +6776,30 @@ async function _runStationSetupTxTest(rigId, { keepPower = false, voice = false 
     }
   }
 
-  if (!keyed) return done({ result: 'error', message: 'The radio could not be keyed. The log panel says why.', restored, restoreNote });
+  // "Keyed" needs evidence (lib/station-setup.js judgeTxTest, #544): the key-down
+  // accepted, no PTT line error inside the window, and where the radio reports
+  // it, power, its TX state or ALC. Never "keyed" after a failed key.
+  const lineError = _pttLineError && _pttLineError.at >= tuneStartedAt ? _pttLineError : null;
+  const judged = StationSetup.judgeTxTest({ pttAccepted: keyed, lineError, ...meas });
+  if (judged.result === 'not-keyed') {
+    sendCatLog(`[Setup] ${voice ? 'voice' : 'test'} transmit result: not keyed — ${lineError ? `${lineError.line} on ${lineError.port} failed: ${lineError.message}` : 'transmit was refused'}`);
+    return done({ ...judged, message: lineError ? undefined : 'The radio was not keyed: POTACAT refused to transmit. The log panel says why.', restored, restoreNote });
+  }
   if (audioFault) {
     // POTACAT refused to send the tone (the radio's audio output would not
     // open) and unkeyed at once — not a "no power" radio problem.
     sendCatLog(`[Setup] test transmit: stopped, the radio's audio output could not be opened (${audioFault.reason})`);
     return done({ result: 'error', message: "POTACAT stopped the test because the radio's audio output could not be opened. Choose the output again under Audio in the radio settings (the step above checks it), then test again.", restored, restoreNote });
   }
-  const watts = Math.round(meas.peakW * 10) / 10;
-  const swr = meas.peakSwr > 0 ? Math.round(meas.peakSwr * 10) / 10 : 0;
-  let result;
-  if (meas.fwdEvents === 0) result = 'unmeasured';
-  else if (watts < 0.5) result = 'no-power';
-  else if (swr >= 3) result = 'swr-high';
-  else result = 'ok';
-  sendCatLog(`[Setup] ${voice ? 'voice' : 'test'} transmit result: ${result}${watts ? `, ${watts} W` : ''}${swr ? `, SWR ${swr}` : ''}`);
+  const { result, watts, swr, keyed: keyedProven, evidence } = judged;
+  sendCatLog(`[Setup] ${voice ? 'voice' : 'test'} transmit result: ${result}${watts ? `, ${watts} W` : ''}${swr ? `, SWR ${swr}` : ''}${evidence ? ` (keyed: ${evidence})` : ' (the radio did not confirm it keyed)'}`);
   // A silent voice path names the radio's input menu (lib/voice-tx-check.js).
   let hint = null;
   if (voice && result === 'no-power') {
-    const d = decideVoiceTxHint({ keyedMs: 3000, fwdEvents: meas.fwdEvents, peakW: 0, alcEvents: 0, peakAlc: 0, mode: modeNow, brand: info.brand });
+    const d = decideVoiceTxHint({ keyedMs: 3000, fwdEvents: meas.fwdEvents, peakW: 0, alcEvents: 0, peakAlc: 0, mode: modeNow, brand: info.brand, model: rig.model });
     hint = d ? d.hint : null;
   }
-  return done({ result, watts, swr, restored, restoreNote, hint });
+  return done({ result, watts, swr, keyed: keyedProven, evidence, restored, restoreNote, hint });
 }
 
 function getIcomNetworkDataModSpec(target, rigModel, liveCivAddr = null) {
@@ -7405,6 +7536,7 @@ function remoteShackInfoNow() {
     radioPowered: remoteRig.radioPowered(), // #152: the CAT popover's Radio: On / Off / Unknown
     canPower: remoteRig.canPower(),
     canPowerOn: remoteRig.canPowerOn(), // #485: false on an off-only radio (FTX-1); Power On hidden
+    canPowerOff: remoteRig.canPowerOff(), // #293: false where the shack could not switch it back on
     audioSilent: !!info.audioSilent,
     audioElsewhere: !!info.audioElsewhere,
     audioHolder: info.audioHolder || '',
@@ -8742,6 +8874,7 @@ function serialHandshakeTrialSave(path) {
 }
 
 async function connectCat() {
+  _radioTxWatch.cat(false); // a dropped radio's last TX status is not a transmission (#200)
   // The test instance talks to Zeus only over its own TCI session.
   if (tciTestData) return;
   connectTci();
@@ -8976,6 +9109,7 @@ async function connectCat() {
     // the next PC; poll overwrote it and no wattmeter ever drew it
     // (LZ3AW's "TX power meter not fixed", 2026-09-14).
     cat.on('powerMeter', sendCatFwdPower);
+    cat.on('ptt', (on) => _radioTxWatch.cat(on)); // the radio's TX status: owner use during a hold (#200)
     cat.on('nb', sendCatNb);
     cat.on('smeter', sendCatSmeter);
     cat.on('swr', sendCatSwr);
@@ -9060,6 +9194,7 @@ async function connectCat() {
     // showed, and no wattmeter drew during a frame (#268, IC-7100).
     cat.on('power', sendCatPower);
     cat.on('powerMeter', sendCatFwdPower);
+    cat.on('ptt', (on) => _radioTxWatch.cat(on)); // the radio's TX status: owner use during a hold (#200)
     sendCatLog(`Connecting to rigctld on 127.0.0.1:${rigctldPort}`);
     transport.connect({ host: '127.0.0.1', port: rigctldPort });
 
@@ -9100,6 +9235,7 @@ async function connectCat() {
     // showed, and no wattmeter drew during a frame (#268, IC-7100).
     cat.on('power', sendCatPower);
     cat.on('powerMeter', sendCatFwdPower);
+    cat.on('ptt', (on) => _radioTxWatch.cat(on)); // the radio's TX status: owner use during a hold (#200)
     const { host, port } = resolveCatHostPort(target, 4532, 'remote rigctld');
     sendCatLog(`Connecting to remote rigctld on ${host}:${port}`);
     transport.connect({ host, port });
@@ -9125,6 +9261,7 @@ async function connectCat() {
     cat.on('mode', catModeHandler);
     cat.on('power', sendCatPower);
     cat.on('powerMeter', sendCatFwdPower);
+    cat.on('ptt', (on) => _radioTxWatch.cat(on)); // the radio's TX status: owner use during a hold (#200)
     cat.on('smeter', sendCatSmeter);
     cat.on('swr', sendCatSwr);
     const { host, port } = resolveCatHostPort(target, 12345, 'flrig');
@@ -9147,6 +9284,7 @@ async function connectCat() {
     });
     cat.on('frequency', catFrequencyHandler);
     cat.on('mode', catModeHandler);
+    cat.on('ptt', (on) => _radioTxWatch.cat(on)); // the radio's TX status: owner use during a hold (#200)
     const { host, port } = resolveCatHostPort(target, CommanderSequences.DEFAULT_PORT, 'DXLab Commander');
     sendCatLog(`Connecting to DXLab Commander on ${host}:${port}`);
     transport.connect({ host, port });
@@ -9173,6 +9311,7 @@ async function connectCat() {
     // the next PC; poll overwrote it and no wattmeter ever drew it
     // (LZ3AW's "TX power meter not fixed", 2026-09-14).
     cat.on('powerMeter', sendCatFwdPower);
+    cat.on('ptt', (on) => _radioTxWatch.cat(on)); // the radio's TX status: owner use during a hold (#200)
     cat.on('nb', sendCatNb);
     cat.on('smeter', sendCatSmeter);
     cat.on('swr', sendCatSwr);
@@ -9217,6 +9356,7 @@ async function connectCat() {
     // the next PC; poll overwrote it and no wattmeter ever drew it
     // (LZ3AW's "TX power meter not fixed", 2026-09-14).
     cat.on('powerMeter', sendCatFwdPower);
+    cat.on('ptt', (on) => _radioTxWatch.cat(on)); // the radio's TX status: owner use during a hold (#200)
     cat.on('nb', sendCatNb);
     cat.on('smeter', sendCatSmeter);
     cat.on('swr', sendCatSwr);
@@ -9230,8 +9370,10 @@ async function connectCat() {
     // by owners; lib/sculan10-transport.js). The transport carries Yaesu CAT
     // ASCII, so the same Kenwood-style codec a USB-connected Yaesu uses
     // attaches unchanged. RX audio comes over the LAN when audioSource is
-    // 'yaesu-lan'; TX audio is not in the spec yet, so handleRemotePtt
-    // refuses a key-down that would send a silent carrier.
+    // 'yaesu-lan'. Voice PTT (VFO window, ECHOCAT) sends its mic over the
+    // LAN (yaesuLanVoicePtt), JTCAT and Tune their buffer (sendTxAudio); the
+    // other transmit paths have no LAN audio yet, so handleRemotePtt refuses
+    // them rather than send a silent carrier.
     transport = new Sculan10Transport();
     const model = rigModel || { brand: 'Yaesu', protocol: 'kenwood', caps: {}, cw: {} };
     model.tune = getTuneQuirks(model);
@@ -9244,6 +9386,7 @@ async function connectCat() {
     cat.on('mode', catModeHandler);
     cat.on('power', sendCatPower);
     cat.on('powerMeter', sendCatFwdPower);
+    cat.on('ptt', (on) => _radioTxWatch.cat(on)); // the radio's TX status: owner use during a hold (#200)
     cat.on('nb', sendCatNb);
     cat.on('smeter', sendCatSmeter);
     cat.on('swr', sendCatSwr);
@@ -9268,17 +9411,43 @@ async function connectCat() {
       const activeRig = (settings.rigs || []).find((r) => r && r.id === settings.activeRigId);
       if (activeRig && activeRig.catTarget && activeRig.catTarget.type === 'yaesu-lan' && !activeRig.audioSource) {
         const def = RigFamily.defaultAudioSourceFor('yaesu-lan');
-        if (settings.audioSource !== def) sendCatLog(`[SCU-LAN10] this rig has no audio source saved; using ${def === 'yaesu-lan' ? 'Yaesu LAN audio (receive only)' : def} instead of the previous rig's "${settings.audioSource || 'none'}". Pick one in Settings > My Rigs.`);
+        if (settings.audioSource !== def) sendCatLog(`[SCU-LAN10] this rig has no audio source saved; using ${def === 'yaesu-lan' ? 'Yaesu LAN audio' : def} instead of the previous rig's "${settings.audioSource || 'none'}". Pick one in Settings > My Rigs.`);
         activeRig.audioSource = def;
         settings.audioSource = def;
       }
     }
-    sendCatLog(`Connecting to the Yaesu SCU-LAN10 (experimental) at ${_ylHp.host}, UDP ports ${_ylHp.port}-${_ylHp.port + 3}${modelName ? `, ${modelName}` : ''}${settings.audioSource === 'yaesu-lan' ? ', RX audio over the LAN' : ', RX audio from the sound card on this computer'}; transmit audio over the LAN is not supported yet. POTACAT ${app.getVersion()}.`);
+    sendCatLog(`Connecting to the Yaesu SCU-LAN10 (experimental) at ${_ylHp.host}, UDP ports ${_ylHp.port}-${_ylHp.port + 3}${modelName ? `, ${modelName}` : ''}${settings.audioSource === 'yaesu-lan' ? ', RX audio, voice, voice macros, JTCAT, Tune and SSTV TX over the LAN (Winlink not yet)' : ', audio from the sound card on this computer'}. POTACAT ${app.getVersion()}.`);
+    // Speaker monitor (opt-in per rig): the transport mutes the radio's
+    // monitor/sidetone per mode and puts it back on disconnect; the values
+    // it found are kept here so a crash or lost link cannot lose them.
+    const _ylMonKey = settings.activeRigId || _ylHp.host;
+    transport.on('monitor-saved', (saved) => {
+      settings.yaesuLanMonitorSaved = { ...(settings.yaesuLanMonitorSaved || {}), [_ylMonKey]: saved };
+      saveSettings(settings);
+    });
+    transport.on('monitor-restored', () => {
+      if (settings.yaesuLanMonitorSaved && settings.yaesuLanMonitorSaved[_ylMonKey]) {
+        delete settings.yaesuLanMonitorSaved[_ylMonKey];
+        saveSettings(settings);
+      }
+    });
+    // The transport could not reach the radio to unkey it (lost session,
+    // another program on the unit, closing while keyed): the operator must know.
+    transport.on('unkey-unreachable', ({ message }) => { // the transport logs it itself
+      if (win && !win.isDestroyed()) win.webContents.send('app-notice', { message, warn: true, duration: 30000 });
+      if (vfoPopoutWin && !vfoPopoutWin.isDestroyed()) vfoPopoutWin.webContents.send('tune-blocked', message);
+      if (remoteServer && remoteServer.running) remoteServer.sendToClient({ type: 'tune-blocked', reason: message });
+    });
+    // Only on a radio an owner confirmed sets ML per mode (the FTDX101 waits for one).
+    const muteMonitor = !!target.muteMonitor && Sculan10.MONITOR_PER_MODE_MODELS.includes(modelName);
+    if (target.muteMonitor && !muteMonitor) sendCatLog(`[SCU-LAN10] speaker monitor mute is for the ${Sculan10.MONITOR_PER_MODE_MODELS.join(' and ')} so far; left off for ${modelName || 'this radio'}`);
     transport.connect({
       host: _ylHp.host,
       basePort: _ylHp.port,
       username: target.username || '',
       password: target.password || '',
+      muteMonitor,
+      monitorSaved: (settings.yaesuLanMonitorSaved || {})[_ylMonKey] || null,
     });
   } else if (target.type === 'icom-network') {
     // Icom RS-BA1 protocol over UDP. Works with:
@@ -9324,6 +9493,7 @@ async function connectCat() {
     // the next PC; poll overwrote it and no wattmeter ever drew it
     // (LZ3AW's "TX power meter not fixed", 2026-09-14).
     cat.on('powerMeter', sendCatFwdPower);
+    cat.on('ptt', (on) => _radioTxWatch.cat(on)); // the radio's TX status: owner use during a hold (#200)
     cat.on('nb', sendCatNb);
     cat.on('smeter', sendCatSmeter);
 	    cat.on('swr', sendCatSwr);
@@ -9436,6 +9606,7 @@ async function connectCat() {
     // the next PC; poll overwrote it and no wattmeter ever drew it
     // (LZ3AW's "TX power meter not fixed", 2026-09-14).
     cat.on('powerMeter', sendCatFwdPower);
+    cat.on('ptt', (on) => _radioTxWatch.cat(on)); // the radio's TX status: owner use during a hold (#200)
     cat.on('nb', sendCatNb);
     cat.on('smeter', sendCatSmeter);
     cat.on('swr', sendCatSwr);
@@ -9458,7 +9629,10 @@ async function connectCat() {
     // nothing came back with RTS held low). Hamlib lists the TS-480 with no
     // flow control, so it is not made a model default; the trial finds the
     // radios that wait for RTS and saves it on that rig.
-    if (hs.source !== 'rig' && SerialHsTrial.trialApplies(model)) armSerialHandshakeNoAnswerTrial(cat, transport, target, hs);
+    // Never on a port whose RTS keys PTT (#544): logged once per port.
+    if (hs.source !== 'rig' && SerialHsTrial.trialSkipReason(model, target) === 'ptt-rts') {
+      if (_serialHsTrial.get(target.path) !== 'ptt-rts') { _serialHsTrial.set(target.path, 'ptt-rts'); sendCatLog(SerialHsTrial.pttRtsSkipLine(target.path)); }
+    } else if (hs.source !== 'rig' && SerialHsTrial.trialApplies(model, target)) armSerialHandshakeNoAnswerTrial(cat, transport, target, hs);
     // Lines low at open on every Yaesu (holdSerialLinesLow): Windows raises DTR/RTS on open.
     transport.connect({ path: target.path, baudRate: target.baudRate || 9600, dtrOff: holdSerialLinesLow(model, target), connectDelay: model.connectDelay, serialHandshake: hs.handshake, stopBits: model.serialStopBits });
   }
@@ -9498,7 +9672,7 @@ async function connectCat() {
       sendCatLog(
         `[CW paddle] DTR keying not supported on ${path} (${error}) — phone-side paddle disabled. ` +
         'Macros/text-send (CI-V 0x17, hamlib send_morse) still work. ' +
-        'For a working paddle: wire an external FTDI/CH340 to the radio\'s CW KEY jack and set it as "CW Key Port" in Settings → Rig.'
+        'For a working paddle: wire an external FTDI/CH340 to the radio\'s CW KEY jack and set it as "CW Key Port" in Settings > ECHOCAT.'
       );
       _setCwPaddleAvailability(false, 'tiocmset-unsupported');
     });
@@ -12550,7 +12724,7 @@ function winlinkPreviewQsy({ dialKhz, mode } = {}) {
   if (!_winlinkPreviewReturnTo && _currentFreqHz) _winlinkPreviewReturnTo = winlinkDialHere('before the gateway pick');
   // FM data the operator sets by hand (#128): the pick moves the dial and leaves the radio's mode alone.
   const pickPm = mode === 'packet' ? winlinkPacketRigMode(mode) : null;
-  tuneRadio(khz, mode === 'packet' ? (pickPm && pickPm.byHand ? undefined : 'FM') : 'DIGU', undefined, { origin: 'Winlink gateway pick' });
+  tuneRadio(khz, mode === 'packet' ? (pickPm && pickPm.byHand ? undefined : 'FM') : 'DIGU', undefined, { origin: 'Winlink gateway pick', purpose: 'winlink' });
   _winlinkLeftAtHz = Math.round(khz * 1000);
   winlinkLog(`listening on ${khz.toFixed(1)} kHz for the picked gateway (the radio goes back to ${_winlinkPreviewReturnTo ? (_winlinkPreviewReturnTo.freqHz / 1e6).toFixed(4) + ' MHz' : 'where it was'} when the mail window closes)`);
   return { ok: true };
@@ -12952,7 +13126,10 @@ function winlinkSessionActive() {
   return ['starting', 'connecting', 'connected', 'disconnecting'].includes(winlinkState.session.state);
 }
 
-function winlinkSessionTouch() { _winlinkLastActivity = Date.now(); }
+function winlinkSessionTouch() {
+  _winlinkLastActivity = Date.now();
+  if (!_winlinkSessionByGuest) noteOwnerActivity('winlink');
+}
 
 /** Pat is holding the call until the frequency clears (its busy-channel prompt is pending). */
 function winlinkWaitingForClearChannel() {
@@ -13051,6 +13228,7 @@ async function winlinkStartSession({ mode, gateway, dialKhz, url: rowUrl, origin
   _winlinkSessionErrorKind = '';
   _winlinkPatConnected = false;
   if (radio) _winlinkPreviewReturnTo = null; // the session's returnTo carries it now
+  _winlinkSessionByGuest = !!(passEnforcement && ['active', 'expiring'].includes(passEnforcement.getState()));
   winlinkSessionTouch();
   winlinkSessionPush();
   winlinkLog(`session start: ${mode}${radio ? ` → ${String(gateway).toUpperCase()} on ${Number(dialKhz).toFixed(1)} kHz dial` : ''} (${origin || 'operator'})`);
@@ -13115,7 +13293,7 @@ async function winlinkStartSession({ mode, gateway, dialKhz, url: rowUrl, origin
         } else {
           const tunedAt = Date.now();
           // FM data the operator sets by hand: the dial moves, the radio's mode is left alone.
-          tuneRadio(Number(dialKhz), WinlinkModes.isFmMode(mode) ? (pm && pm.byHand ? undefined : 'FM') : 'DIGU', undefined, { origin: 'Winlink session' });
+          tuneRadio(Number(dialKhz), WinlinkModes.isFmMode(mode) ? (pm && pm.byHand ? undefined : 'FM') : 'DIGU', undefined, { origin: 'Winlink session', purpose: 'winlink' });
           winlinkState.setSession({ tuned: true });
           await winlinkEnterFmDataBeforeDial(mode, pm, tunedAt);
           if (!live()) throw cancelled();
@@ -17875,6 +18053,15 @@ function jtcatSpottedActivator(call) {
   });
 }
 
+/** The JTCAT Stations view's Park column (#557): the program ref a decoded
+ *  call is spotted at ON THE BAND it was heard on, from the same spot list
+ *  Hunt reads (jtcatSpottedActivator). Run from both decode sites. */
+function jtcatSpotRefEnrichDecode(r, call, band) {
+  if (!band || !lastMergedSpots || !lastMergedSpots.length) return;
+  const hit = HuntedPark.findHuntedRefs(lastMergedSpots, call, { band, sameBandOnly: true, myCall: settings.myCallsign });
+  if (hit) r.spotRef = { sig: hit.sig, ref: hit.primaryRef };
+}
+
 /** Log every park of an n-fer the activator's own spot names (default on, #353). */
 function jtcatNferEnabled() {
   return settings.jtcatNferParks !== false;
@@ -18946,7 +19133,8 @@ function armJtcatTxFailsafe(label, samples, sampleRate = 12000, offsetMs = 0, st
     if (settings.audioSource === 'icom-network') {
       forceReleaseIcomNetworkTx(`JTCAT failsafe ${label || 'unknown TX path'}`);
     } else {
-      try { handleRemotePtt(false); } catch {}
+      if (settings.audioSource === 'yaesu-lan') { try { endYaesuLanTx('jtcat', 'JTCAT failsafe'); } catch {} }
+      else { try { handleRemotePtt(false); } catch {} }
     }
   }, timeoutMs);
 }
@@ -20946,6 +21134,7 @@ function startJtcat(mode) {
           jtcatHeardGrids.note(uc, r.grid);
         }
         workedOverlayEnrichDecode(r, uc, currentBand, data.mode || 'FT8');
+        jtcatSpotRefEnrichDecode(r, uc, currentBand);
         // Chase target highlight (renderer/cq-target.js). One rule for popout + phone.
                 // CQ modifier (NA/EU/POTA/TEST...) for the watchlist tag highlighter.
         // A pure text parse - deliberately NOT gated on chase context. The
@@ -21563,6 +21752,24 @@ function startJtcat(mode) {
       return;
     }
 
+    // SCU-LAN10: the buffer goes over the LAN (#227); with no LAN session
+    // there is no way out for it, so nothing is keyed.
+    const yaesuLanDirectTxOk = settings.audioSource === 'yaesu-lan' && yaesuLanBufferTxReady();
+    if (settings.audioSource === 'yaesu-lan' && settings.catTarget && settings.catTarget.type === 'yaesu-lan' && !yaesuLanDirectTxOk) {
+      sendCatLog('[SCU-LAN10] JTCAT TX aborted before PTT: the LAN session is not up, so the audio has no way to the radio.');
+      if (ft8Engine && ft8Engine._txActive) setTimeout(() => jtcatRefuseTx('the Yaesu LAN is not connected'), 0);
+      return;
+    }
+    // Another transmitter on the LAN (a voice over, Tune, SSTV, a macro):
+    // this slot is skipped before PTT, and that transmission goes on.
+    if (yaesuLanDirectTxOk) {
+      const busy = claimYaesuLanTx('jtcat', 'JTCAT TX', ['jtcat']);
+      if (busy) {
+        if (ft8Engine && ft8Engine._txActive) setTimeout(() => jtcatRefuseTx(busy), 0);
+        return;
+      }
+    }
+
     const modeForTx = ft8Engine ? ft8Engine._mode : 'FT8';
     rigPresetFlushPending(); // a preset still settling for this mode goes on BEFORE the key-down
     jtcatNoteTxPowerForMode(modeForTx, data.message, data.freq, ft8Engine ? ft8Engine._txFreq : undefined);
@@ -21577,11 +21784,12 @@ function startJtcat(mode) {
     // after it. A dial that cannot move means audio rendered for the wrong
     // dial: skip this transmission rather than send it off frequency.
     if (!fakeItShiftForTx(data)) {
+      if (yaesuLanDirectTxOk) releaseYaesuLanTx('jtcat', 'split dial did not move');
       jtcatRefuseTx('the split (Fake It) dial could not move');
       return;
     }
-    handleRemotePtt(true, { audio: true, emission: 'DATA', txKind: jtcatTxKind() });
-    armJtcatTxFailsafe(settings.audioSource === 'icom-network' ? 'Icom Network RS-BA1' : (settings.audioSource === 'smartsdr' ? 'SmartSDR Direct' : 'local audio'), data.samples, 12000, data.offsetMs || 0, networkStartDelayMs);
+    handleRemotePtt(true, { audio: true, emission: 'DATA', txKind: jtcatTxKind(), lanOwner: yaesuLanDirectTxOk ? 'jtcat' : undefined });
+    armJtcatTxFailsafe(settings.audioSource === 'icom-network' ? 'Icom Network RS-BA1' : settings.audioSource === 'smartsdr' ? 'SmartSDR Direct' : yaesuLanDirectTxOk ? 'Yaesu LAN (SCU-LAN10)' : 'local audio', data.samples, 12000, data.offsetMs || 0, networkStartDelayMs);
     if (win && !win.isDestroyed()) {
       // Carry the mode so the main-window TX badge reads the actual mode
       // ("JS8 TX" / "PSK31 TX") instead of always "JTCAT TX" (Casey 2026-08-09).
@@ -21683,6 +21891,33 @@ function startJtcat(mode) {
             clearJtcatIcomHardRelease();
           }
         });
+    } else if (yaesuLanDirectTxOk) {
+      // 4. Yaesu SCU-LAN10 (#227): the buffer over the LAN, paced by the
+      //    transport; the radio keys on CAT TX1; meanwhile, so the lead
+      //    silence covers the key-down.
+      const t = yaesuLanTransport();
+      const startDelayMs = jtcatNetworkTxStartDelayMs(modeForTx);
+      const txAudio = conditionDirectTxAudio(data.samples, _jtcatDirectTxGainLevel, 1.0);
+      sendCatLog(`[SCU-LAN10] JTCAT TX over the LAN: ${modeForTx}, 16 kHz S16LE, startDelay=${startDelayMs}ms; ${formatDirectTxAudioStats(txAudio)}. Use the radio's RF power for output and keep ALC low.`);
+      if (txAudio.outputPeak < 0.01) {
+        sendCatLog(`[SCU-LAN10] TX aborted: the audio peak ${txAudio.outputPeak.toFixed(4)} is too low (encoder produced a silent waveform?)`);
+        if (ft8Engine && ft8Engine._txActive) jtcatRefuseTx('the TX audio was silent');
+        endYaesuLanTx('jtcat', 'silent waveform');
+        return;
+      }
+      t.sendTxAudio(txAudio.samples, { offsetMs: data.offsetMs || 0, inputSampleRate: 12000, startDelayMs, tailSilenceMs: 200 })
+        .then(() => {
+          setTimeout(() => {
+            if (ft8Engine && ft8Engine._txActive) ft8Engine.txComplete();
+            else endYaesuLanTx('jtcat', 'JTCAT TX done');
+          }, 150);
+        })
+        .catch((e) => {
+          if (e && e.message === 'TX cancelled') return; // Stop/Halt/failsafe already released PTT
+          sendCatLog(`[SCU-LAN10] JTCAT TX failed: ${e.message}; PTT off (no local-audio fallback while Yaesu LAN audio is selected)`);
+          if (ft8Engine && ft8Engine._txActive) ft8Engine.txComplete();
+          else endYaesuLanTx('jtcat', 'JTCAT TX failed');
+        });
     } else {
       setTimeout(() => {
         if (win && !win.isDestroyed() && ft8Engine && ft8Engine._txActive) {
@@ -21707,7 +21942,10 @@ function startJtcat(mode) {
 	      forceReleaseIcomNetworkTx('JTCAT tx-end');
 	      releaseRadio('jtcat');
 	    } else {
-	      handleRemotePtt(false);
+	      // SCU-LAN10: a slot refused because the LAN was busy ends here too,
+	      // and must not unkey the transmission that holds it.
+	      if (settings.audioSource === 'yaesu-lan') endYaesuLanTx('jtcat', 'JTCAT tx-end');
+	      else handleRemotePtt(false);
 	      releaseRadio('jtcat');
 	    }
 	    fakeItRestoreDial('end of transmission');
@@ -21973,6 +22211,7 @@ const jtcatTuneState = {
   endTimer: null,   // setTimeout ref
   tickTimer: null,  // setInterval ref for countdown broadcast
   directIcom: false,
+  directYaesu: false, // the tone goes over the SCU-LAN10 (#227)
 };
 
 function broadcastJtcatTuneState() {
@@ -22067,21 +22306,34 @@ function startJtcatTune(opts = {}) {
     broadcastJtcatTuneState();
     return;
   }
+  const directYaesuReady = settings.audioSource === 'yaesu-lan' && yaesuLanBufferTxReady();
+  if (settings.audioSource === 'yaesu-lan' && settings.catTarget && settings.catTarget.type === 'yaesu-lan' && !directYaesuReady) {
+    sendCatLog('[SCU-LAN10] Tune blocked: the LAN session is not up, so the tone has no way to the radio.');
+    broadcastJtcatTuneState();
+    return;
+  }
+  if (directYaesuReady && claimYaesuLanTx('tune', 'Tune', ['jtcat', 'vfo', 'echocat'])) {
+    broadcastJtcatTuneState();
+    return;
+  }
   jtcatTuneState.active = true;
   jtcatTuneState.endsAt = Date.now() + JTCAT_TUNE_DURATION_S * 1000;
   jtcatTuneState.directIcom = directIcomReady;
+  jtcatTuneState.directYaesu = directYaesuReady;
   // Audio is genuinely going to the rig USB CODEC, so audio:true triggers
   // SSB-over-DATA where appropriate (USB -> DIGU mute the rig mic during
   // the tone). The 90s timer auto-releases.
   // opts.noDataSwap: Station Setup's voice test keys in plain USB/LSB, the
   // way a voice over does (the radio's SSB audio input, not its DATA one).
-  const keyed = handleRemotePtt(true, { audio: true, emission: opts.emission || 'DATA', noDataSwap: !!opts.noDataSwap, txKind: 'tune' });
+  const keyed = handleRemotePtt(true, { audio: true, emission: opts.emission || 'DATA', noDataSwap: !!opts.noDataSwap, txKind: 'tune', lanOwner: directYaesuReady ? 'tune' : undefined });
   // Refused (SCU-LAN10 audio, SWR guard, licence...): no tone and no timers.
   // The refusal may already have stopped Tune; a tone started after that ran
   // until POTACAT closed (#214).
   if (keyed === false || !jtcatTuneState.active) {
     jtcatTuneState.active = false;
     jtcatTuneState.directIcom = false;
+    if (jtcatTuneState.directYaesu) releaseYaesuLanTx('tune', 'Tune refused');
+    jtcatTuneState.directYaesu = false;
     broadcastJtcatTuneState();
     sendCatLog('[JTCAT] Tune not started: transmit was refused, so no tone was played');
     return;
@@ -22113,6 +22365,26 @@ function startJtcatTune(opts = {}) {
           stopJtcatTune();
         }
       });
+  } else if (jtcatTuneState.directYaesu) {
+    const tone = makeSineToneSamples(jtcatTuneState.toneHz || 1500, JTCAT_TUNE_DURATION_S, Sculan10.TX_AUDIO_RATE, YAESU_LAN_TUNE_PEAK);
+    const txAudio = conditionDirectTxAudio(tone, _jtcatDirectTxGainLevel);
+    const lan = yaesuLanTransport();
+    if (!lan) {
+      // The session went between the check and here: no way out for the tone.
+      sendCatLog('[SCU-LAN10] Tune stopped: the LAN session ended before the tone could start');
+      stopJtcatTune();
+      return;
+    }
+    sendCatLog(`[SCU-LAN10] Tune → radio over the LAN: ${jtcatTuneState.toneHz || 1500} Hz sine; ${formatDirectTxAudioStats(txAudio)}`);
+    lan.sendTxAudio(txAudio.samples, { offsetMs: 0, inputSampleRate: Sculan10.TX_AUDIO_RATE, startDelayMs: 200, tailSilenceMs: 200 })
+      .then(() => { if (jtcatTuneState.active && jtcatTuneState.directYaesu) stopJtcatTune(); })
+      .catch((e) => {
+        if (e && e.message === 'TX cancelled') return;
+        if (jtcatTuneState.active && jtcatTuneState.directYaesu) {
+          sendCatLog(`[SCU-LAN10] Tune over the LAN failed: ${e.message}`);
+          stopJtcatTune();
+        }
+      });
   } else if (win && !win.isDestroyed()) {
     win.webContents.send('jtcat-tune-audio-start');
   }
@@ -22130,8 +22402,12 @@ function stopJtcatTune() {
   _stopDirectTuneTone(); // no-op unless the Flex SmartSDR-Direct path was used
   const wasDirectIcom = jtcatTuneState.directIcom;
   jtcatTuneState.directIcom = false;
+  const wasDirectYaesu = jtcatTuneState.directYaesu;
+  jtcatTuneState.directYaesu = false;
   if (wasDirectIcom && _icomNetworkTransport) {
     forceReleaseIcomNetworkTx('Tune OFF');
+  } else if (wasDirectYaesu) {
+    endYaesuLanTx('tune', 'Tune OFF');
   } else if (win && !win.isDestroyed()) {
     win.webContents.send('jtcat-tune-audio-stop');
     handleRemotePtt(false);
@@ -22414,9 +22690,8 @@ function stopJtcat() {
     forceReleaseIcomNetworkTx('JTCAT stop');
   } else {
     if (_icomNetworkTransport) { try { _icomNetworkTransport.cancelTx(); } catch {} }
-    if (!tciTestRadio?.voiceTxActive) {
-      try { handleRemotePtt(false); } catch {}
-    }
+    if (settings.audioSource === 'yaesu-lan') { try { endYaesuLanTx('jtcat', 'JTCAT stop'); } catch {} }
+    else if (!tciTestRadio?.voiceTxActive) { try { handleRemotePtt(false); } catch {} }
   }
   // A WSPR beacon dies with the engine — and takes its 1 W cap with it. The
   // 1 s tick used to notice the engine was gone and disarm on its own, but
@@ -23899,6 +24174,186 @@ function pushIcomNetworkVoiceChunk(samples) {
   }
 }
 
+// --- Yaesu SCU-LAN10 voice TX (mic -> LAN -> radio), #227 ---------------------
+// The VFO window's PTT and an ECHOCAT device send their mic over the LAN as
+// the Icom Network path does: 24 kHz chunks on dax-tx-chunk, resampled to the
+// unit's 16 kHz. The radio stays in USB/LSB (a Yaesu's DATA-U narrows voice)
+// and takes the LAN audio with SSB MOD SOURCE = AUTO or USB in its menu.
+let _yaesuLanTxChunkCount = 0;
+let _yaesuLanTxPeak = 0;
+let _yaesuLanVoiceResampler = null;
+
+function yaesuLanTransport() {
+  const t = settings.catTarget;
+  if (!t || t.type !== 'yaesu-lan' || !cat || !(cat._transport instanceof Sculan10Transport)) return null;
+  return cat._transport;
+}
+
+function yaesuLanVoiceRoute() {
+  return settings.audioSource === 'yaesu-lan' && !!(settings.catTarget && settings.catTarget.type === 'yaesu-lan');
+}
+
+// A voice PTT edge on the LAN route (VFO window, ECHOCAT): the mic goes over
+// the LAN, the radio stays in USB/LSB. Returns false off the route (the caller
+// keys the usual way); otherwise it has keyed, refused or released here.
+// Voice holds the LAN like any other transmitter: a press while JTCAT, Tune,
+// SSTV or a macro is on the air is refused before PTT, and a release while
+// another one holds it leaves the radio alone. `where` is where the press
+// happened ('vfo', 'echocat'), so a refusal is said there.
+const YAESU_LAN_VOICE_NO_MIC_MS = 1000;
+let _yaesuLanNoMicTimer = null;
+function yaesuLanVoicePtt(state, who, where) {
+  if (!yaesuLanVoiceRoute()) return false;
+  const t = yaesuLanTransport();
+  if (state) {
+    if (!t || !t.txReady) {
+      const why = 'the Yaesu LAN (SCU-LAN10) is not connected, so the mic has no way to the radio. Not keyed.';
+      sendCatLog(`[SCU-LAN10] ${who}: ${why}`);
+      sayYaesuLanTxRefused(why, [where]);
+      return true;
+    }
+    if (_yaesuLanTx.owner === 'voice' && t.voiceTxActive) {
+      handleRemotePtt(true, { audio: true, lanOwner: 'voice' }); // a repeated key-down
+      return true;
+    }
+    if (claimYaesuLanTx('voice', who, [where])) return true;
+    try {
+      _yaesuLanTxChunkCount = 0;
+      _yaesuLanTxPeak = 0;
+      _yaesuLanVoiceResampler = new mercuryAudioBridge.StreamingResampler(24000, Sculan10.TX_AUDIO_RATE);
+      t.startVoiceTx();
+      sendCatLog(`[SCU-LAN10] voice TX started (${who})`);
+    } catch (e) {
+      sendCatLog('[SCU-LAN10] voice TX start failed: ' + e.message + '. Not keyed.');
+      releaseYaesuLanTx('voice', 'voice TX start failed');
+      return true;
+    }
+    if (handleRemotePtt(true, { audio: true, lanOwner: 'voice' }) === false) {
+      yaesuLanVoiceStop('refused key-down');
+      return true;
+    }
+    // "Never a silent carrier": a key-down whose mic never arrives is let go.
+    if (_yaesuLanNoMicTimer) clearTimeout(_yaesuLanNoMicTimer);
+    _yaesuLanNoMicTimer = setTimeout(() => {
+      _yaesuLanNoMicTimer = null;
+      if (_yaesuLanTx.owner !== 'voice' || _yaesuLanTxChunkCount > 0) return;
+      const why = `no mic audio reached POTACAT within ${YAESU_LAN_VOICE_NO_MIC_MS / 1000} s of the key-down, so PTT was released rather than send a silent carrier. Check the mic in the ${where === 'echocat' ? 'ECHOCAT app' : 'VFO window'}.`;
+      sendCatLog(`[SCU-LAN10] ${who}: ${why}`);
+      sayYaesuLanTxRefused(why, [where]);
+      yaesuLanVoiceStop('no mic audio');
+      handleRemotePtt(false);
+    }, YAESU_LAN_VOICE_NO_MIC_MS);
+    return true;
+  }
+  if (_yaesuLanTx.owner !== 'voice') {
+    // Not ours: a release while JTCAT or Tune holds the LAN must not drop it.
+    // With nobody on the LAN a release is always safe, and always sent.
+    if (!_yaesuLanTx.owner) handleRemotePtt(false);
+    else sendCatLog(`[SCU-LAN10] ${who} release ignored: ${YaesuLanTx.OWNER_LABELS[_yaesuLanTx.owner]} holds the LAN`);
+    return true;
+  }
+  yaesuLanVoiceStop(`${who} release`);
+  handleRemotePtt(false);
+  return true;
+}
+
+// Close the voice stream and give the LAN back (the caller unkeys).
+function yaesuLanVoiceStop(why) {
+  if (_yaesuLanNoMicTimer) { clearTimeout(_yaesuLanNoMicTimer); _yaesuLanNoMicTimer = null; }
+  const t = yaesuLanTransport();
+  if (t && t.voiceTxActive) {
+    try { t.stopVoiceTx(); } catch {}
+    sendCatLog(`[SCU-LAN10] voice TX stopped (${why})`);
+  }
+  _yaesuLanTx.release('voice');
+}
+
+// Who holds the LAN for transmitting (lib/yaesu-lan-tx.js): voice, JTCAT,
+// Tune, SSTV or a voice macro. Each takes it with claimYaesuLanTx before its
+// key-down and gives it back with endYaesuLanTx (or releaseYaesuLanTx when
+// it unkeys on its own path); a key-down from anyone else meanwhile is refused.
+const _yaesuLanTx = new YaesuLanTx.YaesuLanTxGate();
+const YAESU_LAN_TUNE_PEAK = 0.5;
+
+function yaesuLanBufferTxReady() {
+  const t = yaesuLanTransport();
+  return yaesuLanVoiceRoute() && !!(t && t.txReady);
+}
+
+// Say a LAN transmit refusal where the press happened ('vfo', 'echocat',
+// 'jtcat', 'sstv', 'main'), and in the log.
+function sayYaesuLanTxRefused(why, where = []) {
+  if (where.includes('vfo') && vfoPopoutWin && !vfoPopoutWin.isDestroyed()) vfoPopoutWin.webContents.send('tune-blocked', why);
+  if (where.includes('jtcat') && jtcatPopoutWin && !jtcatPopoutWin.isDestroyed()) jtcatPopoutWin.webContents.send('tune-blocked', why);
+  if (where.includes('sstv') && sstvPopoutWin && !sstvPopoutWin.isDestroyed()) sstvPopoutWin.webContents.send('tune-blocked', why);
+  if (where.includes('echocat') && remoteServer && remoteServer.running) remoteServer.sendToClient({ type: 'tune-blocked', reason: why });
+  if (where.includes('main') && win && !win.isDestroyed()) win.webContents.send('app-notice', { message: why, warn: true, duration: 10000 });
+}
+
+/** Take the LAN for `owner` before its key-down. Null when it may key; else the refusal, already said. */
+function claimYaesuLanTx(owner, who, where = []) {
+  const why = _yaesuLanTx.claim(owner);
+  if (why) {
+    sendCatLog(`[SCU-LAN10] ${who || YaesuLanTx.OWNER_LABELS[owner]} refused before PTT: ${why}`);
+    sayYaesuLanTxRefused(why, where);
+  }
+  return why;
+}
+
+/** Give the LAN back and cancel `owner`'s own buffer. False when it did not hold it (nothing cancelled). */
+function releaseYaesuLanTx(owner, reason) {
+  if (!_yaesuLanTx.release(owner)) return false;
+  sendCatLog(`[SCU-LAN10] TX released by ${YaesuLanTx.OWNER_LABELS[owner]} (${reason})`);
+  const t = yaesuLanTransport();
+  if (t && owner !== 'voice') { try { t.cancelTx(); } catch {} }
+  return true;
+}
+
+// Whoever holds the LAN (stuck-TX limit): the stream, the buffer, the claim.
+function releaseAllYaesuLanTx(reason) {
+  const was = _yaesuLanTx.owner;
+  if (was === 'voice') yaesuLanVoiceStop(reason);
+  else if (was) releaseYaesuLanTx(was, reason);
+  const t = yaesuLanTransport();
+  if (t) { try { t.cancelTx(); } catch {} try { if (t.voiceTxActive) t.stopVoiceTx(); } catch {} }
+}
+
+/**
+ * May `owner` unkey the radio now? Off the LAN route always. On it, only
+ * while it holds the LAN or nobody does: a JTCAT tx-end, a Tune or SSTV stop
+ * must never drop a voice over (or one another's transmission).
+ */
+function yaesuLanMayUnkey(owner, reason) {
+  if (_yaesuLanTx.mayUnkey({ route: yaesuLanVoiceRoute(), owner })) return true;
+  sendCatLog(`[SCU-LAN10] ${reason}: PTT left as it is, ${YaesuLanTx.OWNER_LABELS[_yaesuLanTx.owner]} holds the LAN`);
+  return false;
+}
+
+/** The end of `owner`'s transmission: its buffer cancelled, the LAN given back, then the unkey. */
+function endYaesuLanTx(owner, reason) {
+  releaseYaesuLanTx(owner, reason);
+  if (yaesuLanMayUnkey(owner, reason)) handleRemotePtt(false);
+}
+
+// One 24 kHz mic chunk from the VFO window or the ECHOCAT bridge.
+function pushYaesuLanVoiceChunk(samples) {
+  const t = yaesuLanTransport();
+  if (!t || !t.voiceTxActive || !_yaesuLanVoiceResampler) return;
+  const out = _yaesuLanVoiceResampler.process(samples);
+  _yaesuLanTxChunkCount++;
+  const peak = peakFloat32(out);
+  if (peak > _yaesuLanTxPeak) _yaesuLanTxPeak = peak;
+  // Heartbeat about once a second (24 kHz / 128-sample chunks = 188/s).
+  if (_yaesuLanTxChunkCount === 1 || _yaesuLanTxChunkCount % 188 === 0) {
+    // Chunk #1 comes before the mic graph has settled: only a whole silent second is a warning.
+    sendCatLog(`[SCU-LAN10] voice TX chunk #${_yaesuLanTxChunkCount}: max peak=${_yaesuLanTxPeak.toFixed(4)}${_yaesuLanTxChunkCount > 1 && _yaesuLanTxPeak < 0.001 ? ' (SILENT: check the mic)' : ''}`);
+    _yaesuLanTxPeak = 0;
+  }
+  try { t.pushVoiceChunk(out); } catch (e) {
+    console.warn('[SCU-LAN10] pushVoiceChunk error:', e.message);
+  }
+}
+
 function handleIcomNetworkAudioFrame(frame) {
   if (!frame || !frame.pcm) return;
   const sampleRate = frame.sampleRate || 48000;
@@ -24266,7 +24721,16 @@ function spotsForPanadapter(merged) {
 // SmartSDR and TCI keep their own panadapter age caps (pushSpotsToSmartSdr,
 // pushSpotsToTci).
 function spotsForScope(merged) {
-  return SpotAge.filterSpotsByAge(spotsForPanadapter(merged), SpotAge.ageOptsFromSettings(settings), Date.now());
+  return spotsWithinMaxAge(spotsForPanadapter(merged));
+}
+
+// The table's Max Spot Age (lib/spot-age.js), for every surface main feeds:
+// Band Scope, bandspread, the Spots pop-out, ECHOCAT, SmartSDR and TCI (#502).
+// capMin is a surface's own shorter cap (the SmartSDR / TCI "max age").
+function spotsWithinMaxAge(list, capMin) {
+  const opts = SpotAge.ageOptsFromSettings(settings);
+  if (capMin > 0) opts.capMin = capMin;
+  return SpotAge.filterSpotsByAge(list, opts, Date.now());
 }
 
 // The pop-outs are pushed when spots arrive. Re-push on a timer as well, so a
@@ -24279,6 +24743,9 @@ function repushPanadapterPopouts() {
   }
   if (bandspreadPopoutWin && !bandspreadPopoutWin.isDestroyed()) {
     bandspreadPopoutWin.webContents.send('spots', spotsForScope(lastMergedSpots || []));
+  }
+  if (spotsPopoutWin && !spotsPopoutWin.isDestroyed()) {
+    spotsPopoutWin.webContents.send('spots-popout-data', spotsWithinMaxAge(lastMergedSpots || []));
   }
 }
 setInterval(repushPanadapterPopouts, PANADAPTER_AGE_REPUSH_MS);
@@ -24309,11 +24776,8 @@ function panadapterWantsSource(source) {
 // activators pota.app shows. Cutting it at Max Spot Age (5 min by default)
 // hid about half of them — N4FFF saw 6 activators on ECHOCAT against 12 on
 // pota.app (2026-09-27). POTA follows the feed unless the operator opts in
-// to the age limit (settings.potaAgeLimit). WWFF/LLOTA/WWBOTA feeds keep
-// spots for hours, so they keep the limit.
-function spotAgeExempt(spot) {
-  return !!spot && spot.source === 'pota' && settings.potaAgeLimit !== true;
-}
+// to the age limit (settings.potaAgeLimit); lib/spot-age.js holds that rule.
+// WWFF/LLOTA/WWBOTA feeds keep spots for hours, so they keep the limit.
 
 function pushSpotsToSmartSdr(spots) {
   if (!smartSdr || !smartSdr.connected) return;
@@ -24322,25 +24786,15 @@ function pushSpotsToSmartSdr(spots) {
   if (now - lastSmartSdrPush < 5000) return;
   lastSmartSdrPush = now;
 
-  const tableMaxAgeMs = ((settings.maxAgeMin != null ? settings.maxAgeMin : 5) * 60000) || 300000;
-  const sdrMaxAgeMs = (settings.smartSdrMaxAge != null ? settings.smartSdrMaxAge : 15) * 60000;
-  const maxAgeMs = sdrMaxAgeMs > 0 ? Math.min(sdrMaxAgeMs, tableMaxAgeMs) : tableMaxAgeMs;
-  // A POTA spot follows the feed's expiry, so only the panadapter's own cap.
-  const potaMaxAgeMs = sdrMaxAgeMs > 0 ? sdrMaxAgeMs : 0;
+  const sdrCapMin = settings.smartSdrMaxAge != null ? settings.smartSdrMaxAge : 15;
   const maxSpots = settings.smartSdrMaxSpots || 0;
 
-  // Apply the user's panadapter-source allowlist (sync-with-table or independent).
-  spots = spotsForPanadapter(spots);
+  // The panadapter-source allowlist (sync-with-table or independent), then the
+  // table's Max Spot Age per source with the panadapter's own cap on top (#502).
+  spots = spotsWithinMaxAge(spotsForPanadapter(spots), sdrCapMin);
 
   let pushed = 0;
   for (const spot of spots) {
-    // Age filter — skip spots older than the effective max age (table age or panadapter age, whichever is smaller)
-    const spotMaxAgeMs = spotAgeExempt(spot) ? potaMaxAgeMs : maxAgeMs;
-    if (spotMaxAgeMs > 0 && spot.spotTime) {
-      const t = spot.spotTime.endsWith('Z') ? spot.spotTime : spot.spotTime + 'Z';
-      const age = now - new Date(t).getTime();
-      if (age > spotMaxAgeMs) continue;
-    }
     smartSdr.addSpot(spot);
     pushed++;
     if (maxSpots > 0 && pushed >= maxSpots) break;
@@ -25092,7 +25546,7 @@ function nocatSerialPtt(state, target) {
     return;
   }
   if (settings.cwKeyPort && settings.cwKeyPort.toLowerCase() === portPath.toLowerCase()) {
-    sendCatLog(`[PTT] FAILED: ${portPath} is also the CW Key Port. One port cannot be both; clear the CW Key Port in Settings > CW or pick another port for PTT.`);
+    sendCatLog(`[PTT] FAILED: ${portPath} is also the CW Key Port. One port cannot be both; clear the CW Key Port in Settings > ECHOCAT or pick another port for PTT.`);
     return;
   }
   const apply = (port) => {
@@ -25890,7 +26344,16 @@ function _sendCwTextToRadioImpl(text, opts) {
   // IC-756 Pro III via rigctld: text went to rigctld's send_morse ('b'),
   // the rig answered RPRT -11, and the separate DTR adapter he explicitly
   // configured sat unused. Configuring the port IS the choice.
-  if (cwCaps.textMethod === 'dtr-key-port' || settings.cwKeyPort) {
+  // Yaesu SCU-LAN10 (#227): the radio is behind the unit, so a CW Key Port
+  // on this computer cannot reach it, and the unit carries no DTR/RTS. Text
+  // goes the CAT way, the model's keyer memory (FT-710: KM1<text>; KY01;),
+  // which DA2PK keyed on the air over the LAN at 50 and 100 W.
+  const lanRig = !!(settings.catTarget && settings.catTarget.type === 'yaesu-lan');
+  if (lanRig && (cwCaps.textMethod === 'dtr-key-port' || settings.cwKeyPort) && !_cwLanKeyPortNoted) {
+    _cwLanKeyPortNoted = true;
+    sendCatLog('[CW] Yaesu LAN: text goes through the radio\'s keyer memory over CAT; the CW Key Port on this computer cannot reach a radio behind the SCU-LAN10.');
+  }
+  if (!lanRig && (cwCaps.textMethod === 'dtr-key-port' || settings.cwKeyPort)) {
     const wpm = (cat && cat._cwWpm) || 20;
     // Honor the per-rig CW-keying-line override (Settings > Radio >
     // CW keying line), exactly like the paddle paths do — raw
@@ -25932,11 +26395,11 @@ function _sendCwTextToRadioImpl(text, opts) {
         // stop: their CAT KY keys the transmitter with NO morse, which is
         // worse than not sending.
         if (cwCaps.textMethod !== 'dtr-key-port' && cat && cat.connected) {
-          sendCatLog('[CW] CW Key Port did not become ready — falling back to CAT CW text. Fix or clear the CW Key Port in Settings > Rig to remove this delay.');
+          sendCatLog('[CW] CW Key Port did not become ready — falling back to CAT CW text. Fix or clear the CW Key Port in Settings > ECHOCAT to remove this delay.');
           cat.sendCwText(expanded, { live });
           return;
         }
-        sendCatLog('[CW] CW Key Port did not become ready — text not sent. Check the CW Key Port in Settings > Rig (and, on Linux, that python3 + pyserial are installed).');
+        sendCatLog('[CW] CW Key Port did not become ready — text not sent. Check the CW Key Port in Settings > ECHOCAT (and, on Linux, that python3 + pyserial are installed).');
       };
       setTimeout(retryKey, 150);
       return;
@@ -25952,7 +26415,7 @@ function _sendCwTextToRadioImpl(text, opts) {
     // hint so the log names the misconfiguration instead of looking healthy.
     if (!_cwTextKyHintLogged && settings.cwKeyPort && cwCaps.textMethod !== 'dtr-key-port' && rigModel?.brand === 'Yaesu') {
       _cwTextKyHintLogged = true;
-      sendCatLog('[CW] Text is going out via the CAT KY command, not your CW Key Port. If this radio is an FT-891 or FT-710, select that exact model in Settings > Rig — on those rigs KY is unreliable (radio keys TX with no morse) and the correct model routes text through the key port instead.');
+      sendCatLog('[CW] Text is going out via the CAT KY command, not your CW Key Port. If this radio is an FT-891 or FT-710, select that exact model in Settings > Radio — on those rigs KY is unreliable (radio keys TX with no morse) and the correct model routes text through the key port instead.');
     }
     // Say which command keys the text: this path logged nothing, so a stuck
     // radio left no trace of how it was keyed (#127). Not per keystroke.
@@ -26020,6 +26483,8 @@ function onCwTextUnavailable(info) {
   sendCatLog(`[CW] ${msg}`);
   if (win && !win.isDestroyed()) win.webContents.send('app-notice', { message: msg, warn: true, duration: 12000 });
 }
+
+let _cwLanKeyPortNoted = false; // said once per session (sendCwTextToRadio)
 
 // Aborts any in-flight CW text send across every dispatch path. Mirrors
 // the shape of sendCwTextToRadio so we catch every backend. AA6C asked
@@ -26729,7 +27194,7 @@ function buildPaddleKeyRig() {
             sendCatLog('[CW] Rigctld backend can\'t key per-element — paddle keying via dedicated CW Key Port (DTR) instead.');
           } else {
             sendCatLog('[CW] Paddle keying is not supported over rigctld — hamlib has no per-element CW keying command, only mic PTT (T 1/T 0). The radio would TX with no CW output. ' +
-              'Workarounds: (1) type text in the CW widget\'s text box — that uses hamlib\'s send_morse and works correctly; (2) wire an external USB-UART (FTDI / CH340) to the rig\'s CW KEY jack and set it as "CW Key Port" in Settings → Rig.');
+              'Workarounds: (1) type text in the CW widget\'s text box — that uses hamlib\'s send_morse and works correctly; (2) wire an external USB-UART (FTDI / CH340) to the rig\'s CW KEY jack and set it as "CW Key Port" in Settings > ECHOCAT.');
             // Tell the phone its paddle won\'t make RF — suppresses local
             // sidetone and shows a red banner with the workaround. G5HOW
             // FTDx10 + Hamlib v1.5.11 2026-04-30.
@@ -26818,10 +27283,7 @@ function buildPaddleKeyRig() {
           !(process.platform === 'win32' && _cwKeyPortIoctlLatched && _cwKeyPortPathForPython === settings.cwKeyPort);
         if (!(cwKeyPort && cwKeyPort.isOpen) && !_keyPortPaddlePossible && !_cwTxrxPttOnlyLogged) {
           _cwTxrxPttOnlyLogged = true;
-          sendCatLog('[CW] Paddle keying on this Yaesu/Kenwood rig would only key PTT (TX1;/TX0;) — no CW output or sidetone. ' +
-            'For a real paddle: connect the rig\'s OTHER USB COM port (the one not used for CAT — "Standard" on the FTDX10, "Enhanced/CAT-2" on FT-710/991), ' +
-            'set the rig menu PC KEYING (or USB Keying (CW)) = DTR or RTS, and select that port as the CW Key Port in Settings → Rig — then set Settings → Rig → CW keying line to match, and enable BK-IN. ' +
-            'Or type in the CW text box — that uses the rig\'s internal keyer and makes real RF. See docs/linux-cw-keying.md.');
+          sendCatLog(txrxPttOnlyHint(rigModel));
           _setCwPaddleAvailability(false, 'txrx-ptt-only');
         }
         // Skip cat-side keying; the dedicated CW Key Port block below (if open) keys.
@@ -27170,6 +27632,8 @@ function connectRemote() {
     // LAN, in DATA mode unless the rig says its DATA OFF MOD is LAN.
     if (icomNetworkVoiceTx(state, 'ECHOCAT phone PTT')) {
       handleRemotePtt(state, icomLanVoicePttOpts());
+    } else if (yaesuLanVoicePtt(state, 'ECHOCAT phone PTT', 'echocat')) {
+      // SCU-LAN10: the phone's mic over the LAN; the radio stays in USB/LSB.
     } else {
       handleRemotePtt(state);
     }
@@ -27422,7 +27886,7 @@ function connectRemote() {
     // start for the next one that never asked (mobile handoff, follow-up 2).
     // This fires when the LAST device is gone; one of several leaving is
     // 'scope-client-gone' (#358).
-    const hadRemoteScope = yaesuScopeRemoteWants || yaesuScopeRemoteDigital;
+    const hadRemoteScope = yaesuScopeRemoteWants || yaesuScopeRemoteDigital || yaesuScopeRemoteWinlink;
     scopeRemoteApply(scopeWatchers.clear());
     if (hadRemoteScope) {
       if (!yaesuScopeWanted()) { try { stopYaesuScope('ECHOCAT client disconnected'); } catch { /* not running */ } }
@@ -27849,7 +28313,9 @@ function connectRemote() {
 
   remoteServer.on('set-echo-filters', (filters) => {
     if (!filters) return;
-    settings.echoFilters = filters;
+    // The client's ticked bands become the operator's off list, read against
+    // this rig, so a rig switch can re-tick them (#291, lib/spot-band-filter.js).
+    settings.echoFilters = SpotBandFilter.fromClient(filters, settings.echoFilters, activeRigBands());
     saveSettings(settings);
   });
 
@@ -28061,11 +28527,12 @@ function connectRemote() {
 
   // TX Power from ECHOCAT — debounce to avoid serial command flooding and feedback loops
   let _txPowerTimer = null;
-  remoteServer.on('set-txpower', ({ value }) => {
+  remoteServer.on('set-txpower', ({ value: asked }) => {
     if (tciRigTarget()) {
-      applyRigControl({ action: 'set-tx-power', value }, 'echocat');
+      applyRigControl({ action: 'set-tx-power', value: asked }, 'echocat');
       return;
     }
+    const value = AmpDrive.clampW(asked, activeAmpDriveLimitW()); // amplifier drive limit
     _currentTxPower = value;
     // The operator has taken the level over — a WSPR restore must not undo it.
     if (!wsprBeaconArmed()) wsprForgetPreCapPower();
@@ -28949,10 +29416,12 @@ function connectRemote() {
   });
   // The phone's FT8 tab (or its Pan in a digital mode) asks for the digital
   // view on a Flex pan; its Pan outside FT8 keeps the operator's own zoom.
-  remoteServer.on('scope-digital-view', ({ on, clientId } = {}) => {
-    const before = yaesuScopeRemoteDigital;
-    scopeRemoteApply(scopeWatchers.setDigital(clientId, on));
-    if (yaesuScopeRemoteDigital === before) return;
+  // view 'winlink': the phone's Mail tab shows the scope; the pan centres on
+  // the Winlink modem's channel (counted apart from the JTCAT view).
+  remoteServer.on('scope-digital-view', ({ on, clientId, view } = {}) => {
+    const before = yaesuScopeRemoteDigital, beforeWl = yaesuScopeRemoteWinlink;
+    scopeRemoteApply(scopeWatchers.setDigital(clientId, on, view));
+    if (yaesuScopeRemoteDigital === before && yaesuScopeRemoteWinlink === beforeWl) return;
     flexDigitalViewSync();
   });
   remoteServer.on('scope-span', ({ spanHz, guest } = {}) => { setScopeSpan(spanHz, 'ECHOCAT device', { guest }); });
@@ -29017,6 +29486,7 @@ function connectRemote() {
   });
 
   remoteServer.on('jtcat-reply', async (data) => {
+    const replyArrivedMs = StationClock.now(); // for the arrival line below: phone delay vs station delay
     jtcatNoteOperatorAtRadio(); // a tap-to-reply on the phone is the operator, see jtcat-popout-call-cq
     let { call, df, slot, sliceId, snr } = data; // `call` is rebased below (re-derivation / hound)
     // Route TX to correct slice in multi-slice mode
@@ -29135,6 +29605,8 @@ function connectRemote() {
       phase = 'reply';
     }
 
+    let replyFiredNow = false, replyDecidedMs = 0;
+    const fireReply = () => { replyFiredNow = targetEngine.tryImmediateTx(); replyDecidedMs = StationClock.now(); };
     if (phase === '73') {
       const prev = remoteJtcatQso;
       const sameCall = prev && prev.call && prev.call.toUpperCase() === call.toUpperCase();
@@ -29144,7 +29616,7 @@ function connectRemote() {
         myCall, myGrid, txRetries: 0, sliceId: sliceKey };
       await remoteJtcatSetTxMsg(txMsg);
       targetEngine._txEnabled = true;
-      targetEngine.tryImmediateTx();
+      fireReply();
       if (!sameCall) await jtcatAutoLog(remoteJtcatQso);
     } else if (phase === 'reply') {
       // Fresh reply with our grid (or report, in Skip Grid) — new QSO entry.
@@ -29152,14 +29624,25 @@ function connectRemote() {
       if (houndReply) { remoteJtcatQso.hound = true; if (houndFullCall && houndFullCall !== remoteJtcatQso.call) remoteJtcatQso.logCall = houndFullCall; }
       await remoteJtcatSetTxMsg(txMsg);
       targetEngine._txEnabled = true;
-      targetEngine.tryImmediateTx();
+      fireReply();
     } else {
       // QSO already populated above by send-report / send-r-report / send-rr73.
       await remoteJtcatSetTxMsg(txMsg);
       targetEngine._txEnabled = true;
-      targetEngine.tryImmediateTx();
+      fireReply();
     }
     remoteJtcatBroadcastQso();
+    // One line per reply request: how far into its slot it reached the station
+    // and which slot it goes out in (2026-11-05 FT4 report: a log could not tell
+    // a slow phone from a slow station). FT2 has no slots.
+    if (typeof targetEngine._cycleSec === 'function' && targetEngine._mode !== 'FT2') {
+      const periodMs = targetEngine._cycleSec() * 1000;
+      const plan = JtcatTxSlot.replyTxPlan({
+        nowMs: replyDecidedMs || StationClock.now(), periodMs, firedNow: !!replyFiredNow,
+        slot: JtcatTxSlot.effectiveTxSlot({ txSlot: targetEngine._txSlot, lockedTxSlot: targetEngine._lockedTxSlot, lastRxSlot: targetEngine._lastRxSlot }),
+      });
+      sendCatLog(JtcatTxSlot.replyArrivalLine({ source: 'ECHOCAT', call, arrivedMs: replyArrivedMs, periodMs, plan }));
+    }
     console.log('[JTCAT Remote]', nextStep, '→', call, ':', txMsg, 'phase:', phase, 'slot:', targetEngine._txSlot, 'locked:', targetEngine._lockedTxSlot);
   });
 
@@ -30088,10 +30571,14 @@ function connectRemote() {
       && settings.kiwiSdrList[0].host) || '';
     const raw = msg.host || settings.kiwiSdrHost1 || settings.kiwiSdrHost || listFirst;
     const clean = raw.replace(/^https?:\/\//, '').replace(/\/+$/, '');
-    sendCatLog(`[WebSDR] ECHOCAT connect: "${clean}"`);
-    const parts = clean.split(':');
+    // An inline station password ("pw@host" or "user:pw@host") is split off
+    // before the host:port split, and never written to the log.
+    const inlinePw = sdrUserinfo(clean);
+    const hostPort = stripSdrUserinfo(clean);
+    sendCatLog(`[WebSDR] ECHOCAT connect: "${hostPort}"`);
+    const parts = hostPort.split(':');
     if (parts[0]) {
-      require('electron').ipcMain.emit('kiwi-connect', { sender: { send: () => {} } }, { host: parts[0], port: parseInt(parts[1], 10) || 8073, password: msg.password });
+      require('electron').ipcMain.emit('kiwi-connect', { sender: { send: () => {} } }, { host: parts[0], port: parseInt(parts[1], 10) || 8073, password: msg.password || inlinePw || undefined });
     }
   });
   remoteServer.on('kiwi-disconnect', () => {
@@ -30164,6 +30651,7 @@ function disconnectRemote() {
 let _ssbModeBeforePtt = null; // original mode saved during DATA-mode PTT workaround
 let _ssbFreqBeforePtt = 0;    // dial freq saved at swap time — restore re-anchors here, never to a mid-TX polled freq
 let _ssbOverDataYaesuWarned = false; // log the rig-menu hint once per session
+let _ssbOverDataFmAmWarned = false; // log 'SSB-over-DATA does not apply in FM or AM' once per session (#561)
 
 // --- Flex TX audio source (transmit set dax=) -------------------------------
 // The radio transmits POTACAT's direct VITA-49 dax_tx audio ONLY while the
@@ -30391,6 +30879,7 @@ function txLimitTrip(t) {
   try { if (ct.type === 'none' && ct.ptt === 'cm108' && win && !win.isDestroyed()) win.webContents.send('cm108-ptt', { state: false, gpio: Number.isInteger(ct.gpio) ? ct.gpio : 3 }); } catch {}
   try { if (smartSdr && smartSdr.connected) gatedSmartSdrTransmit(false); } catch {}
   try { if (settings.audioSource === 'icom-network') forceReleaseIcomNetworkTx('stuck-TX limit'); } catch {}
+  try { if (settings.audioSource === 'yaesu-lan') releaseAllYaesuLanTx('stuck-TX limit'); } catch {}
   const msg = t.message;
   if (win && !win.isDestroyed()) win.webContents.send('app-notice', { message: msg, warn: true, duration: 20000 });
   if (vfoPopoutWin && !vfoPopoutWin.isDestroyed()) vfoPopoutWin.webContents.send('tune-blocked', msg);
@@ -30525,16 +31014,17 @@ function pttConfirmRestore(restoreMode, restoreFreq, noAnchor, since) {
   });
 }
 
-// The words for a key-down refused because the SCU-LAN10 has no transmit
-// audio path yet; null when transmitting is fine.
+// The words for a key-down refused on the SCU-LAN10 route; null when it may
+// key (#227). A key-down passes while its own transmitter holds the LAN
+// (`asking`: 'voice', 'jtcat', 'tune', 'sstv', 'macro'); one from anywhere
+// else is refused, with no holder because it would be a silent carrier, with
+// one because it would key or unkey under that transmission.
 let _yaesuLanTxNoticeAt = 0;
 // A raw Yaesu/Kenwood key-down anywhere in a custom CAT string: TX1; or TX2;
 // (TX0; is receive and always passes).
 const RAW_CAT_KEYDOWN_RE = /(^|;)\s*TX[12]\s*(;|$)/i;
-function yaesuLanTxRefusal() {
-  const t = settings.catTarget;
-  if (!t || t.type !== 'yaesu-lan' || settings.audioSource !== 'yaesu-lan') return null;
-  return "transmit audio over the Yaesu LAN (SCU-LAN10) is not supported yet, so the radio would send a silent carrier. To transmit, set Audio Source to the radio's USB sound card on this computer (CAT stays on the LAN), or use the radio's own microphone.";
+function yaesuLanTxRefusal(asking = null) {
+  return _yaesuLanTx.refusal({ route: yaesuLanVoiceRoute(), asking });
 }
 
 /** Is POTACAT sending the audio for this key-down? opts.audio when the caller
@@ -30575,6 +31065,35 @@ function startTciEchoVoice() {
   return reason;
 }
 
+// A TS-480 with no transmit audio input saved is not keyed over CAT until the
+// operator answers which socket the interface is on (#594, Casey 2026-11-15:
+// ask on first transmit). Returns the refusal text, or null when it may key.
+let _txAudioInputAskedAt = 0;
+function txAudioInputRefusal() {
+  const rig = (settings.rigs || []).find(r => r && r.id === settings.activeRigId);
+  if (!rig) return null;
+  const t = rig.catTarget || settings.catTarget || {};
+  const overrides = rig.model && settings.rigCommandOverrides && settings.rigCommandOverrides[rig.model];
+  if (!TxAudioInput.needsAnswer(rig, { catType: t.type, ptt: t.ptt, pttOverride: overrides && overrides.setTransmitOn })) return null;
+  return TxAudioInput.refusalText(rig.model);
+}
+function askTxAudioInput(why) {
+  const rig = (settings.rigs || []).find(r => r && r.id === settings.activeRigId);
+  sendCatLog(`[PTT] refused — ${why}`);
+  if (vfoPopoutWin && !vfoPopoutWin.isDestroyed()) vfoPopoutWin.webContents.send('tune-blocked', why);
+  if (remoteServer && remoteServer.running) remoteServer.sendToClient({ type: 'tune-blocked', reason: why });
+  // A transmission that keeps asking (JTCAT's next slot) must not keep trying.
+  try { if (jtcatAnyTxActive() || jtcatTuneState.active) jtcatHaltTxNow('the transmit audio input is not set'); } catch {}
+  if (!rig || !win || win.isDestroyed()) return;
+  if (Date.now() - _txAudioInputAskedAt < 3000) return;
+  _txAudioInputAskedAt = Date.now();
+  win.webContents.send('tx-audio-input-ask', {
+    rigId: rig.id, radioName: rig.model || rig.name || '',
+    title: TxAudioInput.QUESTION_TITLE, help: TxAudioInput.QUESTION_HELP,
+  });
+  if (win.isMinimized()) win.restore();
+}
+
 // Returns false when it refuses a key-down (callers with audio must not play it).
 function handleRemotePtt(state, opts = {}) {
   if (tciTestData || tciRigTarget()) {
@@ -30589,6 +31108,7 @@ function handleRemotePtt(state, opts = {}) {
   // opens this desktop's mic into the audio link. There is no local radio to
   // key, and the shack runs its own SWR guard and PTT watchdog.
   if (isRemoteMode()) { keyRemoteShack(state); return; }
+  if (state) noteOwnerActivity('ptt'); // every key-down is owner use while the owner holds a lent radio (#200)
   // SWR-guard latch backstop — covers every PTT source (voice macros, mobile
   // device PTT, naked PTT) in one place. Releases (state=false) always pass.
   if (state && _swrTripped) {
@@ -30630,15 +31150,23 @@ function handleRemotePtt(state, opts = {}) {
     if (remoteServer && remoteServer.hasClient && remoteServer.hasClient()) remoteServer.sendToClient({ type: 'tune-blocked', reason: why });
     return false;
   }
+  // A TS-480 whose transmit audio input is not known yet (#594): the wrong
+  // socket is a carrier with no audio, so nothing keys until the shack answers.
+  if (state && txAudioInputRefusal()) {
+    askTxAudioInput(txAudioInputRefusal());
+    return false;
+  }
   // Yaesu SCU-LAN10 (experimental): the spec has not decoded transmit audio,
   // so keying with the LAN as the audio source puts a SILENT carrier on the
   // air. Refused, said where the press happened, and JTCAT stops trying.
   // With Audio Source set to the radio's USB sound card on this computer
   // (CAT still over the LAN), the audio has a way out and PTT works.
-  if (state && yaesuLanTxRefusal()) {
-    const why = yaesuLanTxRefusal();
+  if (state && yaesuLanTxRefusal(opts.lanOwner || null)) {
+    const why = yaesuLanTxRefusal(opts.lanOwner || null);
     sendCatLog(`[PTT] refused — ${why}`);
-    try { if (jtcatAnyTxActive() || jtcatTuneState.active) jtcatHaltTxNow('no transmit audio over the Yaesu LAN'); } catch {}
+    // Only a key-down with no audio at all stops JTCAT; a busy LAN is someone
+    // else's transmission, and halting JTCAT would unkey it.
+    try { if (!_yaesuLanTx.owner && (jtcatAnyTxActive() || jtcatTuneState.active)) jtcatHaltTxNow('no transmit audio over the Yaesu LAN'); } catch {}
     if (vfoPopoutWin && !vfoPopoutWin.isDestroyed()) vfoPopoutWin.webContents.send('tune-blocked', why);
     if (remoteServer && remoteServer.running) remoteServer.sendToClient({ type: 'tune-blocked', reason: why });
     if (win && !win.isDestroyed() && Date.now() - _yaesuLanTxNoticeAt > 60000) {
@@ -30762,6 +31290,13 @@ function handleRemotePtt(state, opts = {}) {
     const _inData = !!(pttModeReport() || {}).data;
     const _dataPlan = PttModeSwap.sessionDataPlan({ hold: _holdData, inData: _inData, tried: _holdData && _winlinkDataAskedFor === _winlinkSessionSeq });
     if (_dataPlan === 'switch-hold') _winlinkDataAskedFor = _winlinkSessionSeq; // one switch per session, never one per over (#300)
+    // Which DATA mode, if any (lib/ptt-mode-swap.js pttDataModeFor): FM and AM
+    // switch only on a radio with real FM-D / AM-D forms (KS9B KX3, #561).
+    const _dataRig = getActiveRigModel();
+    const _dataPick = PttModeSwap.pttDataModeFor({
+      mode: curMode, forced: forceData,
+      fmAmData: PttModeSwap.hasFmAmDataMode({ brand: _dataRig && _dataRig.brand, rigType: detectRigType() }),
+    });
     if (_dataPlan === 'keep') {
       if (_pttDataHeldLoggedFor !== _winlinkSessionSeq) {
         _pttDataHeldLoggedFor = _winlinkSessionSeq;
@@ -30769,15 +31304,18 @@ function handleRemotePtt(state, opts = {}) {
           ? '[PTT] the radio is in DATA mode already — keying without a mode change; it stays in DATA until the Winlink session ends'
           : `[PTT] the radio reports ${_currentMode || 'no mode'}, not a DATA mode, after this session asked for one — keying as it is, with no mode change on any frame. If nothing is transmitted, set the radio's modulation source for this mode to USB.`);
       }
-    } else if (curMode === 'USB' || curMode === 'LSB' || curMode === 'SSB' || curMode === 'FM' || curMode === 'AM') {
+    } else if (_dataPick.skip === 'fm-am') {
+      // No FM or AM data form on this radio: USB data on an FM channel is
+      // garbage to every listener, so key in the voice mode and say so once.
+      if (!_ssbOverDataFmAmWarned) {
+        _ssbOverDataFmAmWarned = true;
+        sendCatLog(PttModeSwap.fmAmSkipLog(curMode));
+      }
+    } else if (_dataPick.dataMode) {
       // FM and AM have their own data forms on an Icom (FM-D / AM-D). Sending
       // them to USB-D moved an IC-9700 off FM for every voice over (KG5EIU).
-      const _dataRig = getActiveRigModel();
       const _icomData = !!(_dataRig && _dataRig.brand === 'Icom');
-      const dataMode = (curMode === 'LSB') ? 'DIGL'
-        : (_icomData && curMode === 'FM') ? 'DIGFM'
-        : (_icomData && curMode === 'AM') ? 'DIGAM'
-        : 'DIGU';
+      const dataMode = _dataPick.dataMode;
       _ssbModeBeforePtt = _dataPlan === 'switch-hold' ? null : curMode; // held: the session end puts the mode back, once
       // Capture the dial BEFORE the swap. During TX in DATA mode a Yaesu with
       // DATA MODE = PSK reports the subcarrier-shifted TX carrier (~1.5 kHz
@@ -30982,6 +31520,14 @@ function _setCwTxLockout(durationMs) {
   if (_cwTxLockoutTimer) clearTimeout(_cwTxLockoutTimer);
   _cwTxLockoutTimer = setTimeout(() => {
     _cwTxLockoutTimer = null;
+    // The lockout is over: every extension above clears this timer and arms a
+    // new one, so the timer that fires is the last one. Clear it outright
+    // rather than leave it to Date.now(): a timer can fire a millisecond
+    // before Date.now() reaches the target, and the broadcast then said
+    // "transmitting" with no timer left to say otherwise. The VFO window's PTT
+    // stayed on "ON AIR" after CW text macros until PTT was pressed (DA2PK,
+    // FT-710, 2026-11-15).
+    _cwTxLockoutUntilMs = 0;
     // Re-broadcast — _isEffectivelyTransmitting now reflects whether
     // any other TX source is still active (user PTT, FT8 mid-cycle).
     _broadcastEffectiveTxState();
@@ -31030,6 +31576,9 @@ function sendVfoState() {
     // #485: false on a radio that can be switched off over CAT but not on
     // (FTX-1); the window then shows Power Off alone.
     powerOn: vfoPowerOnAvailable(),
+    // #293: false where POTACAT could not switch the radio back on and the
+    // operator has not allowed Power Off for this rig; Power Off is hidden.
+    powerOff: vfoPowerOffAvailable(),
     // False while the radio does not answer (switched off, cable out): the
     // window shows dashes, not the last dial, which looked like a radio
     // still on after Power Off.
@@ -31075,6 +31624,9 @@ function vfoPowerAvailable() {
 }
 function vfoPowerOnAvailable() {
   try { return RigPower.powerOnAvailable(getRigCapabilities(detectRigType())); } catch { return false; }
+}
+function vfoPowerOffAvailable() {
+  try { const c = getRigCapabilities(detectRigType()); return !!c.power && c.powerOff !== false; } catch { return false; }
 }
 
 function applyFreedvAudioMute() {
@@ -31708,7 +32260,11 @@ function _buildAudioBridgeConfig() {
     (t.type === 'k4-network' && cat && cat.connected) ||
     // Icom Network: the client's mic goes over RS-BA1, never to a PC sound
     // device (the legacy route played it on this computer's speakers).
-    (settings.audioSource === 'icom-network' && !!(_icomNetworkTransport && _icomNetworkTransport.txReady));
+    (settings.audioSource === 'icom-network' && !!(_icomNetworkTransport && _icomNetworkTransport.txReady)) ||
+    // SCU-LAN10: the client's mic goes over the LAN too (#227).
+    // By route, not readiness: the phone's mic must never play on this
+    // computer's speakers, and reaches the stream once PTT opens it.
+    yaesuLanVoiceRoute();
   return {
     inputDeviceId:  tciAudio ? '' : (settings.remoteAudioInput || ''),
     outputDeviceId: tciAudio ? '' : (settings.remoteAudioOutput || ''),
@@ -31958,24 +32514,15 @@ function pushSpotsToTci(spots) {
   if (now - lastTciPush < 5000) return;
   lastTciPush = now;
 
-  const tableMaxAgeMs = ((settings.maxAgeMin != null ? settings.maxAgeMin : 5) * 60000) || 300000;
-  const tciMaxAgeMs = (settings.tciMaxAge != null ? settings.tciMaxAge : 15) * 60000;
-  const maxAgeMs = tciMaxAgeMs > 0 ? Math.min(tciMaxAgeMs, tableMaxAgeMs) : tableMaxAgeMs;
-  const potaMaxAgeMs = tciMaxAgeMs > 0 ? tciMaxAgeMs : 0;
+  const tciCapMin = settings.tciMaxAge != null ? settings.tciMaxAge : 15;
 
   // Apply the user's panadapter-source allowlist — TCI is treated as a
   // panadapter destination (Casey: "what is good for the panadapter is
-  // good for the bandscope" — same applies here).
-  spots = spotsForPanadapter(spots);
+  // good for the bandscope" — same applies here). Then the table's Max Spot
+  // Age per source, with TCI's own cap on top (#502).
+  spots = spotsWithinMaxAge(spotsForPanadapter(spots), tciCapMin);
 
   for (const spot of spots) {
-    // Age filter — skip spots older than the effective max age (table age or panadapter age, whichever is smaller)
-    const spotMaxAgeMs = spotAgeExempt(spot) ? potaMaxAgeMs : maxAgeMs;
-    if (spotMaxAgeMs > 0 && spot.spotTime) {
-      const t = spot.spotTime.endsWith('Z') ? spot.spotTime : spot.spotTime + 'Z';
-      const age = now - new Date(t).getTime();
-      if (age > spotMaxAgeMs) continue;
-    }
     tciClient.addSpot(spot);
   }
   // Remove spots no longer in the list (instead of clear+re-add which causes flashing)
@@ -33113,32 +33660,15 @@ function sendMergedSpots() {
   if (!isRemoteLinked()) win.webContents.send('spots', merged);
   pushSpotsToSmartSdr(merged);
   pushSpotsToTci(merged);
-  // Forward to ECHOCAT — all modes (phone-side Mode dropdown handles filtering), respect max spot age
+  // Forward to ECHOCAT — all modes (phone-side Mode dropdown handles filtering),
+  // with the table's Max Spot Age per source (lib/spot-age.js, #502): net spots
+  // never age out, POTA follows the feed unless potaAgeLimit, PSKReporter 15 min.
   if (remoteServer && remoteServer.running) {
-    const maxAgeMs = ((settings.maxAgeMin != null ? settings.maxAgeMin : 5) * 60000) || 300000;
-    const dxcMaxAgeMs = ((settings.dxcMaxAge != null ? settings.dxcMaxAge : 15) * 60000) || 900000;
-    const sotaMaxAgeMs = ((settings.sotaMaxAge != null ? settings.sotaMaxAge : 30) * 60000) || 1800000;
-    const now = Date.now();
-    const echoSpots = merged.filter(s => {
-      // Net spots always pass through to ECHOCAT
-      if (s.source === 'net') return true;
-      // Age filter — pick per-source window
-      if (s.spotTime) {
-        const t = s.spotTime.endsWith('Z') ? s.spotTime : s.spotTime + 'Z';
-        const age = now - new Date(t).getTime();
-        let limit = maxAgeMs;
-        if (s.source === 'dxc') limit = dxcMaxAgeMs;
-        else if (s.source === 'sota') limit = sotaMaxAgeMs;
-        else if (spotAgeExempt(s)) limit = Infinity; // the feed expires POTA spots itself
-        if (age > limit) return false;
-      }
-      return true;
-    });
-    remoteServer.broadcastSpots(echoSpots);
+    remoteServer.broadcastSpots(spotsWithinMaxAge(merged));
   }
-  // Forward to spots pop-out if open
+  // Forward to spots pop-out if open, aged like the table (#502)
   if (spotsPopoutWin && !spotsPopoutWin.isDestroyed()) {
-    spotsPopoutWin.webContents.send('spots-popout-data', merged);
+    spotsPopoutWin.webContents.send('spots-popout-data', spotsWithinMaxAge(merged));
   }
   // Forward to bandspread pop-out if open (reuses 'spots' channel) — apply
   // the same panadapter-source filter so bandspread mirrors the panadapter
@@ -34341,6 +34871,7 @@ let yaesuScopeStartAfterExit = false;
 let yaesuScopeSynth = false;         // generated signal, no radio (pop-out gear menu)
 let yaesuScopeRemoteWants = false;   // an ECHOCAT client has its Scope view open (any of them: scopeWatchers)
 let yaesuScopeRemoteDigital = false; // C2S scope-digital-view: the client shows FT8 / a digital Pan
+let yaesuScopeRemoteWinlink = false; // C2S scope-digital-view {view: 'winlink'}: a device's Mail tab shows the scope
 let yaesuScopeJtcatWants = false;    // the JTCAT pop-out is showing the band scope strip
 let yaesuScopeBandspreadWants = false;   // the Bandspread window draws the scope trace behind its spots
 let yaesuScopeRemoteIsGuest = false; // ...and that client holds a Guest Pass (may watch, never change the radio)
@@ -34350,6 +34881,7 @@ const scopeWatchers = createScopeWatchers();
 function scopeRemoteApply(sum) {
   yaesuScopeRemoteWants = sum.wants;
   yaesuScopeRemoteDigital = sum.digital;
+  yaesuScopeRemoteWinlink = !!sum.winlink;
   yaesuScopeRemoteIsGuest = sum.guest;
   return sum;
 }
@@ -35408,15 +35940,26 @@ function startFlexScope() {
  */
 let flexDigitalViewKey = '';
 function flexDigitalViewWanted() {
-  if (!flexScopeOn || !ft8Engine) return null;
+  if (!flexScopeOn) return null;
   // The desktop's FT8 strip, or an ECHOCAT device showing FT8 (C2S
   // scope-digital-view) while the engine runs.
-  const strip = yaesuScopeJtcatWants && jtcatPopoutWin && !jtcatPopoutWin.isDestroyed();
-  const device = yaesuScopeRemoteDigital && yaesuScopeRemoteWants && ft8Engine._running
-    && remoteServer && remoteServer.running && remoteServer.hasClient();
-  if (!strip && !device) return null;
+  const strip = !!(ft8Engine && yaesuScopeJtcatWants && jtcatPopoutWin && !jtcatPopoutWin.isDestroyed());
+  const device = !!(ft8Engine && yaesuScopeRemoteDigital && yaesuScopeRemoteWants && ft8Engine._running
+    && remoteServer && remoteServer.running && remoteServer.hasClient());
+  // The Winlink view (2026-11-15): a radio session runs, or a device's Mail
+  // tab shows the scope (C2S scope-digital-view {view: 'winlink'}).
+  const wlSession = winlinkSessionActive() && WinlinkModes.isRadioMode(winlinkState.session.mode);
+  const wlAsked = !!(yaesuScopeRemoteWinlink && yaesuScopeRemoteWants && remoteServer && remoteServer.running && remoteServer.hasClient());
+  const pick = ScopeDigitalView.pickView({ winlinkSession: wlSession, jtcatWanted: strip || device, winlinkAsked: wlAsked });
+  if (!pick) return null;
   const id = smartSdr && (smartSdr.panScopeId || smartSdr.ourPanId);
   const g = (id && flexPanGeometry[id]) || {};
+  if (pick === 'winlink') {
+    const mode = wlSession ? winlinkState.session.mode : WinlinkModes.pickWinlinkMode(winlinkState.snapshot().modes, settings.winlinkDefaultMode || 'telnet');
+    if (!WinlinkModes.isRadioMode(mode)) return null;
+    return ScopeDigitalView.winlinkView({ band: WinlinkSpectrum.markerBand(mode, winlinkModemBw()), rigMode: _currentMode,
+      digOffsetHz: ScopeDigitalView.flexDigOffsetHz(_currentMode, _flexSliceKv), minSpanHz: g.minSpanHz });
+  }
   return ScopeDigitalView.digitalView({ mode: ft8Engine._mode, rigMode: _currentMode, minSpanHz: g.minSpanHz });
 }
 function flexDigitalViewSync() {
@@ -35438,7 +35981,7 @@ function flexDigitalViewSync() {
     smartSdr.setPanBandwidth(v.spanHz);
     yaesuScopeState.spanHz = v.spanHz;   // the pan status confirms (or clamps) it
     if (dial) flexScopeAskCenter(dial + v.offsetHz);
-    sendCatLog(`[Scope] Flex panadapter: ${ft8Engine._mode} view, ${v.spanHz} Hz wide, centred ${v.offsetHz > 0 ? '+' : ''}${v.offsetHz} Hz from the dial (decode window ${v.window.lo} to ${v.window.hi} Hz)`);
+    sendCatLog(`[Scope] Flex panadapter: ${v.kind === 'winlink' ? 'Winlink' : ft8Engine._mode} view, ${v.spanHz} Hz wide, centred ${v.offsetHz > 0 ? '+' : ''}${v.offsetHz} Hz from the dial (${v.kind === 'winlink' ? `the modem's channel ${v.window.lo} to ${v.window.hi} Hz${ScopeDigitalView.flexDigOffsetHz(_currentMode, _flexSliceKv) ? `, with the slice's ${String(_currentMode).toUpperCase()} offset of ${ScopeDigitalView.flexDigOffsetHz(_currentMode, _flexSliceKv)} Hz` : ''}` : `decode window ${v.window.lo} to ${v.window.hi} Hz`})`);
   } else if (wasOn) {
     flexScopeWantOffsetHz = 0;
     flexDigitalView = null;
@@ -35795,7 +36338,6 @@ function icomScopeBaudTooSlow(target) {
   return !!target && target.type === 'icom' && b > 0 && b < 57600;
 }
 
-const ICOM_SCOPE_BAUD_ACTION = 'On the radio: MENU > SET > Connectors > CI-V > CI-V USB Baud Rate, choose 115200. In POTACAT: Settings > My Rigs, edit this radio, Baud rate 115200.';
 
 function icomScopeDiag(key, extra = {}) {
   const name = (icomScopeEntry && icomScopeEntry.name) || 'Icom';
@@ -35804,7 +36346,7 @@ function icomScopeDiag(key, extra = {}) {
       severity: 'blocker',
       headline: 'The band scope needs a faster link to the radio',
       detail: `POTACAT talks to the ${name} at ${extra.baud || '?'} baud. Over USB the radio sends its scope only at 115200.`,
-      action: ICOM_SCOPE_BAUD_ACTION,
+      action: icomScopeBaudAction(icomScopeEntry && icomScopeEntry.name),
     },
     'no-link': {
       severity: 'blocker',
@@ -35822,7 +36364,7 @@ function icomScopeDiag(key, extra = {}) {
       severity: 'blocker',
       headline: 'The radio refused to send its scope',
       detail: `The ${name} answered "no" when POTACAT asked for its scope data. Over USB that is the baud rate: the radio sends its scope only at 115200.`,
-      action: ICOM_SCOPE_BAUD_ACTION,
+      action: icomScopeBaudAction(icomScopeEntry && icomScopeEntry.name),
     },
     silent: {
       severity: 'blocker',
@@ -36300,8 +36842,8 @@ function startSdrScope() {
   const builder = new SdrScope.SpectrumBuilder({ sampleRate: cfg.sampleRate, fps: Math.min(30, settings.yaesuScopeFps || 12) });
   sdrScopeClient = client;
   sdrScopeBuilder = builder;
-  sdrScopeTunedHz = SdrScope.sdrCenterForDial(dial, cfg.offsetHz);
-  builder.on('frame', (f) => { if (sdrScopeClient === client) yaesuScopeOnFrame(f); });
+  sdrScopeTunedHz = SdrScope.sdrTuneHz(dial, cfg);
+  builder.on('frame', (f) => { if (sdrScopeClient === client) yaesuScopeOnFrame(SdrScope.orientFrame(f, cfg)); });
   client.on('iq', (chunk) => { if (sdrScopeClient === client) builder.feed(chunk); });
   client.on('header', (h) => {
     // Every greeting, not just the first: a restarted rtl_tcp comes back at
@@ -36309,7 +36851,7 @@ function startSdrScope() {
     for (const b of SdrScope.setupCommands(cfg, sdrScopeTunedHz)) client.send(b);
     sendCatLog(`[Scope] SDR connected: ${cfg.host}:${cfg.port}, ${h.tunerName}, ${(cfg.sampleRate / 1e6).toFixed(3)} MS/s, gain ${cfg.gain === 'auto' ? 'auto' : cfg.gain + ' dB'}`
       + (cfg.directSampling !== 'off' ? `, direct sampling ${cfg.directSampling.toUpperCase()}` : '')
-      + (cfg.offsetHz ? `, offset ${cfg.offsetHz} Hz` : ''));
+      + (SdrScope.isFixedIf(cfg) ? `, on the radio's IF output at ${cfg.ifHz} Hz${cfg.invertIf ? ' (mirrored)' : ''}` : (cfg.offsetHz ? `, offset ${cfg.offsetHz} Hz` : '')));
   });
   client.on('state', (st, info) => {
     if (sdrScopeClient !== client) return;
@@ -36332,7 +36874,7 @@ function startSdrScope() {
 // The scope owns it while it runs; the listener demodulates the scope's IQ.
 
 function rtlTcpScopeShareOf(client, cfg) {
-  return { client, sampleRate: cfg.sampleRate, centerHz: () => (sdrScopeClient === client ? sdrScopeTunedHz : 0) };
+  return { client, sampleRate: cfg.sampleRate, centerHz: () => (sdrScopeClient === client ? SdrScope.shareCenterHz(yaesuScopeState.centerHz, sdrScopeTunedHz, cfg) : 0) };
 }
 
 /** The band scope's stream, if the scope is reading host:port right now. */
@@ -36371,13 +36913,13 @@ function stopSdrScope(why) {
 /** Retune the SDR to the dial, debounced so a spun knob is one command per 150 ms. */
 function sdrScopeFollowDial(dialHz) {
   if (!sdrScopeClient || !sdrScopeCfg) return;
-  const target = SdrScope.sdrCenterForDial(dialHz, sdrScopeCfg.offsetHz);
+  const target = SdrScope.sdrTuneHz(dialHz, sdrScopeCfg);
   if (!target || target === sdrScopeTunedHz) return;
   if (sdrScopeRetuneTimer) return;
   sdrScopeRetuneTimer = setTimeout(() => {
     sdrScopeRetuneTimer = null;
     if (!sdrScopeClient || !sdrScopeCfg) return;
-    const hz = SdrScope.sdrCenterForDial(yaesuScopeState.centerHz, sdrScopeCfg.offsetHz);
+    const hz = SdrScope.sdrTuneHz(yaesuScopeState.centerHz, sdrScopeCfg);
     if (hz && hz !== sdrScopeTunedHz) { sdrScopeTunedHz = hz; sdrScopeClient.setFrequency(hz); }
   }, 150);
 }
@@ -37115,7 +37657,7 @@ async function sendToQrzLogbook(qsoData, s = settings) {
 
   // Comment already enriched with park name in saveQsoRecord()
   const record = buildAdifRecord(qsoData);
-  await QrzClient.uploadQso(apiKey, record, s.myCallsign || '');
+  return QrzClient.uploadQso(apiKey, record, s.myCallsign || '');
 }
 
 // --- App lifecycle ---
@@ -40156,8 +40698,13 @@ function jtcatHaltTxNow(reason, opts = {}) {
     forceReleaseIcomNetworkTx('JTCAT halt');
   } else {
     if (_icomNetworkTransport) { try { _icomNetworkTransport.cancelTx(); } catch {} }
-    try { handleRemotePtt(false); } catch (e) { console.error('[Halt] PTT:', e); }
-    try { if (cat && cat.connected) gatedSetTransmit(false); } catch {}
+    // SCU-LAN10: Halt stops JTCAT and Tune (stopJtcatTune above), never a
+    // voice over, SSTV picture or macro holding the LAN.
+    if (settings.audioSource === 'yaesu-lan') releaseYaesuLanTx('jtcat', 'JTCAT halt');
+    if (yaesuLanMayUnkey('jtcat', 'JTCAT halt')) {
+      try { handleRemotePtt(false); } catch (e) { console.error('[Halt] PTT:', e); }
+      try { if (cat && cat.connected) gatedSetTransmit(false); } catch {}
+    }
     try { if (detectRigType() === 'flex' && smartSdr && smartSdr.connected) gatedSmartSdrTransmit(false); } catch {}
   }
   releaseRadio('jtcat');
@@ -40199,7 +40746,10 @@ function jtcatAnyTxActive() {
 }
 
 function sstvHaltTxNow() {
-  try { handleRemotePtt(false); } catch (e) { console.error('[SSTV] halt PTT release:', e); }
+  // SCU-LAN10: HALT also stops the picture on the wire, and gives the LAN
+  // back; it never unkeys another transmitter holding it.
+  if (settings.audioSource === 'yaesu-lan') { try { endYaesuLanTx('sstv', 'SSTV halt'); } catch (e) { console.error('[SSTV] halt LAN release:', e); } }
+  else { try { handleRemotePtt(false); } catch (e) { console.error('[SSTV] halt PTT release:', e); } }
   if (sstvPopoutWin && !sstvPopoutWin.isDestroyed()) {
     sstvPopoutWin.webContents.send('sstv-abort-tx');
   }
@@ -40213,8 +40763,8 @@ function gatedSetTransmit(state, emission) {
   // a CAT key-down from ANY path here would be a silent carrier. The
   // external-ATU tune carrier (an AM/CW carrier on purpose) stays allowed;
   // the radio's own ATU (cat.startTune) never comes through here.
-  if (state && yaesuLanTxRefusal() && !_externalAtuActive) {
-    const why = yaesuLanTxRefusal();
+  if (state && yaesuLanTxRefusal(YaesuLanTx.ANY_HOLDER) && !_externalAtuActive) {
+    const why = yaesuLanTxRefusal(YaesuLanTx.ANY_HOLDER);
     sendCatLog(`[PTT] CAT transmit refused — ${why}`);
     if (vfoPopoutWin && !vfoPopoutWin.isDestroyed()) vfoPopoutWin.webContents.send('tune-blocked', why);
     if (remoteServer && remoteServer.running) remoteServer.sendToClient({ type: 'tune-blocked', reason: why });
@@ -40257,10 +40807,17 @@ function gatedSetTransmit(state, emission) {
       return false;
     }
     cat.setTransmitLine(t.ptt, state, (err) => {
+      if (err && state) _pttLineError = { at: Date.now(), line, port: t.path || 'the CAT port', message: err.message };
       if (err) sendCatLog(`[PTT] FAILED: ${line} on ${t.path || 'the CAT port'}: ${err.message}`);
       else sendCatLog(`[PTT] ${state ? 'TX' : 'RX'} — ${line} ${state ? 'raised' : 'dropped'} on the CAT port`);
     });
     return true;
+  }
+  // Backstop for key-downs that do not come through handleRemotePtt (FreeDV,
+  // the external-ATU carrier): the same unanswered TS-480 question (#594).
+  if (state && txAudioInputRefusal()) {
+    askTxAudioInput(txAudioInputRefusal());
+    return false;
   }
   if (cat && cat.connected) cat.setTransmit(state);
   return true;
@@ -40401,7 +40958,7 @@ function bandJumpMode(freqKhz) {
   return sb || undefined;
 }
 
-function tuneRadio(freqKhz, mode, brng, { clearXit, origin } = {}) {
+function tuneRadio(freqKhz, mode, brng, { clearXit, origin, purpose } = {}) {
   let freqHz = Math.round(parseFloat(freqKhz) * 1000); // kHz -> Hz
   // An FT8/FT4/FT2 spot names the signal (dial + audio offset): tune the
   // mode's dial when the spot is in its passband (lib/dial-snap.js).
@@ -40804,12 +41361,12 @@ function tuneRadio(freqKhz, mode, brng, { clearXit, origin } = {}) {
   // Guard with !isFreedvMode so a FreeDV tune (which the block above already
   // resolved to DIGU/USB per the independent freedvUseDataMode setting) isn't
   // re-rewritten here.
-  if (settings.jtcatUseDataMode === false && mode && !isFreedvMode) {
-    const dm = String(mode).toUpperCase();
-    if (dm === 'FT8' || dm === 'FT4' || dm === 'FT2' || dm === 'DIGU' || dm === 'PKTUSB' || dm === 'JS8' || dm === 'WSPR' || dm.startsWith('PSK') || dm === 'JTTY') {
-      mode = 'USB';
-    } else if (dm === 'DIGL' || dm === 'PKTLSB') {
-      mode = 'LSB';
+  // A Winlink radio session is not JTCAT and keeps the data mode (lib/plain-ssb-for-digital.js).
+  {
+    const plain = PlainSsbForDigital.plainSsbForDigital(mode, { useDataMode: settings.jtcatUseDataMode !== false, purpose, freedv: isFreedvMode });
+    if (plain !== mode) {
+      sendCatLog(`[tune] ${String(mode).toUpperCase()} -> ${plain}: "Switch radio to DATA mode (PKTUSB) for FT8 / FT4 (JTCAT)" is off`);
+      mode = plain;
     }
   }
 
@@ -42173,7 +42730,7 @@ function cloudShackNotice(text, kind) {
       const msg = err.message || String(err);
       // The 403 body's billing object says WHY (lapsed grant, failed card)
       // and carries the fix; the renderer shows that sentence, not ours.
-      if (msg === 'entitlement-required') return { error: 'entitlement-required', billing: (err.cause && err.cause.body && err.cause.body.billing) || null };
+      if (msg === 'entitlement-required') return { error: 'entitlement-required', billing: (err.cause && err.cause.body && err.cause.body.billing) || null, message: (err.cause && err.cause.message) || '' };
       if (msg === 'cloudflared-missing') return { error: 'cloudflared-missing' };
       if (msg === 'auth-required') return { error: 'auth-required' };
       sendCatLog('[cloud-tunnel] enable failed: ' + msg);
@@ -42392,6 +42949,11 @@ function cloudShackNotice(text, kind) {
       rs.on('pass-owner-controls', (c) => {
         if (win && !win.isDestroyed()) win.webContents.send('pass-owner-controls', c);
       });
+      // The guest was told the radio is free (#200 step 4): once per offer.
+      rs.on('pass-owner-idle-offered', (session) => {
+        sendCatLog(`[pass] The owner has not used the radio for 5 minutes; ${session.call || 'the guest'} may take it back`);
+        onOwnerIdleOffered(session);
+      });
       rs.on('pass-guest-left', ({ code }) => {
         clearPassDisconnectTimer();
         if (passEnforcement.endPassIfCode(code, 'left')) sendCatLog(`[pass] The guest left the rig; it is free for the next pass`);
@@ -42455,7 +43017,9 @@ function cloudShackNotice(text, kind) {
   });
   ipcMain.handle('pass-give-back', async () => {
     if (!remoteServer || !remoteServer.resumePass) return { error: 'No guest on the rig' };
-    return { ok: remoteServer.resumePass('desktop') };
+    // Whoever took it: an owner device's hold no longer ends on its own
+    // (#200 step 4), so the desk can give it back too.
+    return { ok: remoteServer.resumePass() };
   });
 
   // Share My Rig's owner controls (#200): Take the radio (Now / In 5 minutes,
@@ -43443,7 +44007,7 @@ function cloudShackNotice(text, kind) {
     spotsPopoutWin.webContents.on('did-finish-load', () => {
       // Send current spots immediately
       const merged = [...lastPotaSotaSpots, ...clusterSpots, ...rbnWatchSpots, ...pskrSpots];
-      spotsPopoutWin.webContents.send('spots-popout-data', merged);
+      spotsPopoutWin.webContents.send('spots-popout-data', spotsWithinMaxAge(merged));
       if (win && !win.isDestroyed()) {
         win.webContents.send('spots-popout-status', true);
       }
@@ -44181,6 +44745,7 @@ function cloudShackNotice(text, kind) {
   // existing handlers apply them. Without this the VFO popout's buttons were
   // silent no-ops in remote mode (NA7C 2026-07-17); only 'tune' was routed.
   ipcMain.on('vfo-set-mode', (_e, mode) => {
+    noteOwnerActivity('mode');
     if (isRemoteMode()) { if (isRemoteLinked()) remoteClient.sendSetMode(mode); else refuseRemoteNotLinked(_e.sender); return; }
     if (!_currentFreqHz) return;
     _lastTuneFreq = 0; // reset rate limiter
@@ -45031,9 +45596,7 @@ function cloudShackNotice(text, kind) {
   ipcMain.on('winlink-open-settings', () => {
     if (win && !win.isDestroyed()) { win.show(); win.focus(); win.webContents.send('open-settings-winlink'); }
   });
-  ipcMain.on('winlink-open-folder', () => {
-    try { require('electron').shell.openPath(winlinkPaths().dir); } catch {}
-  });
+  ipcMain.handle('winlink-open-folder', () => openFolderLogged(winlinkPaths().dir, 'Winlink folder', 'Winlink'));
   // The rig's FT8 sound device ids, so the mail window can resolve their names.
   ipcMain.handle('winlink-audio-rig', () => {
     const rig = winlinkActiveRig();
@@ -45097,9 +45660,7 @@ function cloudShackNotice(text, kind) {
   ipcMain.handle('winlink-recovery-email-get', () => winlinkRecoveryEmailGet());
   ipcMain.handle('winlink-recovery-email-set', (_e, email) => winlinkRecoveryEmailSet(email));
   ipcMain.handle('winlink-cmd-set-password', (_e, pw) => winlinkSetPassword(pw, 'mail window'));
-  ipcMain.on('mercury-open-downloads', () => {
-    try { require('electron').shell.openPath(path.join(app.getPath('userData'), 'mercury-downloads')); } catch {}
-  });
+  ipcMain.handle('mercury-open-downloads', () => openFolderLogged(path.join(app.getPath('userData'), 'mercury-downloads'), 'Mercury downloads folder', 'Mercury'));
   // Device discovery wizard: run `mercury -x <ss> -z` and parse the sound-card
   // list so Settings can offer a one-click picker instead of hand-typed names.
   ipcMain.handle('mercury-list-devices', async () => {
@@ -45193,18 +45754,32 @@ function cloudShackNotice(text, kind) {
         }
         return;
       }
+      // SCU-LAN10 (#227): the picture goes over the LAN; with no LAN session
+      // it has no way to the radio, so nothing is keyed.
+      const useYaesuLanTx = settings.audioSource === 'yaesu-lan' && yaesuLanBufferTxReady();
+      if (settings.audioSource === 'yaesu-lan' && settings.catTarget && settings.catTarget.type === 'yaesu-lan' && !useYaesuLanTx) {
+        sendCatLog('[SSTV] Yaesu LAN TX blocked before PTT: the LAN session is not up, so the picture has no way to the radio.');
+        if (remoteServer) remoteServer.broadcastSstvTxStatus({ state: autoSstvActive ? 'auto-rx' : 'rx' });
+        return;
+      }
+      if (useYaesuLanTx && claimYaesuLanTx('sstv', 'SSTV picture', ['sstv', 'echocat'])) {
+        if (sstvPopoutWin && !sstvPopoutWin.isDestroyed()) sstvPopoutWin.webContents.send('sstv-abort-tx');
+        if (remoteServer) remoteServer.broadcastSstvTxStatus({ state: autoSstvActive ? 'auto-rx' : 'rx' });
+        return;
+      }
       // Key PTT. The SSTV audio goes through the rig's USB audio, so say so:
       // SSB-over-DATA applies (it never did — this call carried no `audio`),
       // and an Icom always transmits it in USB-D/LSB-D, because in plain USB
       // its factory DATA OFF MOD setting takes the mic, not USB, and the rig
       // keys with no audio (WB8IMY IC-7300, 2026-09-26). Receive stays in USB.
       const _sstvIcom = detectRigType() === 'icom' || (getActiveRigModel()?.brand === 'Icom');
-      if (handleRemotePtt(true, { audio: true, forceDataMode: _sstvIcom, emission: 'SSTV', txKind: 'sstv' }) === false) {
+      if (handleRemotePtt(true, { audio: true, forceDataMode: _sstvIcom, emission: 'SSTV', txKind: 'sstv', lanOwner: useYaesuLanTx ? 'sstv' : undefined }) === false) {
         if (sstvPopoutWin && !sstvPopoutWin.isDestroyed()) sstvPopoutWin.webContents.send('sstv-abort-tx');
         // The reason reaches the phone too, not only a bare "rx" (#357).
         const ownWhy = _ownTxRefused && Date.now() - _ownTxRefused.at < 3000 ? _ownTxRefused.why : '';
-        sstvSendFailed('Picture not sent: ' + (yaesuLanTxRefusal() || ownWhy || 'transmit was refused (see the log).'),
-          { log: 'picture not sent: transmit was refused' });
+        const why = yaesuLanTxRefusal(useYaesuLanTx ? 'sstv' : null) || ownWhy || 'transmit was refused (see the log).';
+        if (useYaesuLanTx) releaseYaesuLanTx('sstv', 'SSTV refused');
+        sstvSendFailed('Picture not sent: ' + why, { log: 'picture not sent: transmit was refused' });
         return;
       }
 
@@ -45256,6 +45831,7 @@ function cloudShackNotice(text, kind) {
       const _sstvKeyCalledAt = Date.now();
       const _sstvStartAudio = (fn) => pttKeyGate().then((keyed) => {
         if (!keyed) {
+          if (useYaesuLanTx) releaseYaesuLanTx('sstv', 'SSTV not keyed');
           sendCatLog('[SSTV] PTT was released before the radio keyed — picture not sent');
           if (remoteServer) remoteServer.broadcastSstvTxStatus({ state: autoSstvActive ? 'auto-rx' : 'rx' });
           return;
@@ -45348,6 +45924,37 @@ function cloudShackNotice(text, kind) {
                   state: autoSstvActive ? 'auto-rx' : 'rx',
                 });
               }
+            });
+        } else if (useYaesuLanTx) {
+          // SCU-LAN10 (#227): 48 kHz picture audio, resampled to 16 kHz by
+          // the transport (SSTV tones are at most 2300 Hz). Gain only, no
+          // clipping: the tones carry the picture in their exact frequencies.
+          const txAudio = conditionDirectTxAudio(outSamples, clampNumber(settings.sstvTxGain, 0, 1, 0.5), 1.0);
+          sendCatLog(`[SSTV] TX via Yaesu LAN (SCU-LAN10) — ${outDurSec.toFixed(0)}s (${outSamples.length} samples @48k); ${formatDirectTxAudioStats(txAudio)}`);
+          const done = (why) => {
+            endYaesuLanTx('sstv', why);
+            if (remoteServer) remoteServer.broadcastSstvTxStatus({ state: autoSstvActive ? 'auto-rx' : 'rx' });
+          };
+          if (txAudio.outputPeak < 0.01) {
+            sendCatLog(`[SSTV] TX aborted: conditioned audio peak ${txAudio.outputPeak.toFixed(4)} is too low (encoder produced silent waveform?)`);
+            done('SSTV silent waveform');
+            return;
+          }
+          if (sstvPopoutWin && !sstvPopoutWin.isDestroyed()) {
+            sstvPopoutWin.webContents.send('sstv-tx-audio', { samples: [], durationSec: outDurSec, daxTx: true, directTxLabel: 'Yaesu LAN' });
+          }
+          const t = yaesuLanTransport();
+          if (!t) {
+            sendCatLog('[SSTV] Yaesu LAN TX stopped: the LAN session ended before the picture could start');
+            done('SSTV no LAN session');
+            return;
+          }
+          t.sendTxAudio(txAudio.samples, { offsetMs: 0, inputSampleRate: SSTV_SAMPLE_RATE, startDelayMs: 100, tailSilenceMs: 200 })
+            .then(() => { sendCatLog('[SSTV] TX complete (Yaesu LAN)'); done('SSTV done'); })
+            .catch((err) => {
+              if (err && err.message === 'TX cancelled') return;
+              sendCatLog(`[SSTV] Yaesu LAN TX failed: ${err.message}`);
+              done('SSTV failed');
             });
         } else if (sstvPopoutWin && !sstvPopoutWin.isDestroyed()) {
           sstvPopoutWin.webContents.send('sstv-tx-audio', {
@@ -45758,7 +46365,8 @@ function cloudShackNotice(text, kind) {
   });
 
   ipcMain.on('sstv-tx-complete', () => {
-    handleRemotePtt(false);
+    if (settings.audioSource === 'yaesu-lan') endYaesuLanTx('sstv', 'SSTV tx-complete');
+    else handleRemotePtt(false);
     if (sstvPopoutWin && !sstvPopoutWin.isDestroyed()) {
       sstvPopoutWin.webContents.send('sstv-tx-status', { state: 'rx' });
     }
@@ -45959,11 +46567,12 @@ function cloudShackNotice(text, kind) {
     if (saved) sendCatLog(`[SSTV] Kept a weak decode at the operator's request: ${saved.filename || ''}`);
     return saved;
   });
-  ipcMain.on('sstv-open-gallery-folder', async () => {
+  ipcMain.handle('sstv-open-gallery-folder', async () => {
     // Made off the main process with a time limit, like the gallery itself: a
     // Pictures folder that does not answer is logged, never a frozen app (#123).
-    const galleryDir = await ensureSstvGalleryDirAsync();
-    if (galleryDir) require('electron').shell.openPath(galleryDir);
+    // Made every time, not only once: a folder deleted after the window opened
+    // made the button do nothing (#546). The window shows a failure.
+    return openFolderLogged(getSstvGalleryDir(), 'SSTV pictures folder', 'SSTV');
   });
 
   // SSTV pop-out window
@@ -46267,6 +46876,21 @@ function cloudShackNotice(text, kind) {
         const r = stationSetupResultsFor(rigId);
         r.txTest = { result: 'tune-tone', at: Date.now() };
         sendCatLog('[Setup] tune tone sent for 3 s (no CAT control — did the radio key?)');
+        break;
+      }
+      case 'ptt-flow-fix': {
+        // The operator pressed one of the two fixes for PTT on RTS with RTS/CTS
+        // flow control on the same port (#544). Only then is a setting changed.
+        const fixRig = stationSetupRigById(rigId);
+        const fix = PttFlowConflict.FIXES.find((f) => f.id === req.step);
+        if (!fixRig || !fixRig.catTarget || !fix) break;
+        fixRig.catTarget = PttFlowConflict.applyFix(fixRig.catTarget, fix.id);
+        const isActive = fixRig.id === settings.activeRigId;
+        if (isActive) settings.catTarget = { ...fixRig.catTarget };
+        try { saveSettings(settings); } catch {}
+        sendCatLog(`[Setup] Transmit (PTT) setting: ${fix.id === 'rts-held-low' ? 'RTS line set to Held low' : 'PTT set to Over CAT'} on ${fixRig.catTarget.path || 'the CAT port'}, as chosen in Station Setup`);
+        message = fix.id === 'rts-held-low' ? 'RTS is now held low, so RTS can key the radio.' : 'POTACAT now keys the radio over CAT.';
+        if (isActive) setTimeout(() => connectCatSafe('ptt-flow-fix'), 300);
         break;
       }
       case 'tx-test-confirm': {
@@ -47110,9 +47734,10 @@ function cloudShackNotice(text, kind) {
   // Head/tail selection keeps the clipboard paste Discord-sized; redaction
   // runs here so log lines from disk never reach the paste unmasked.
   // ── LoTW via the operator's TQSL (docs/tqsl-lotw-plan.md, Phase 1) ─────────
-  ipcMain.handle('lotw-locations', () => {
+  // opts.tqslPath: the TQSL program field as typed, before Save (#343).
+  ipcMain.handle('lotw-locations', (_e, opts) => {
     const { findTqsl, stationDataCandidates, parseStationLocations } = require('./lib/tqsl');
-    const tqsl = findTqsl(settings.tqslPath);
+    const tqsl = findTqsl((opts && typeof opts.tqslPath === 'string') ? opts.tqslPath : settings.tqslPath);
     let locations = [];
     for (const sd of stationDataCandidates()) {
       try { locations = parseStationLocations(fs.readFileSync(sd, 'utf8')); break; }
@@ -47150,14 +47775,14 @@ function cloudShackNotice(text, kind) {
   ipcMain.handle('lotw-upload', (_e, opts) => uploadLotw(opts));
 
   async function uploadLotwBatches(opts) {
-    const { findTqsl, buildTqslArgs, mapTqslExit } = require('./lib/tqsl');
+    const { findTqsl, buildTqslArgs, mapTqslExit, TQSL_SETTING_PLACE } = require('./lib/tqsl');
     const { buildActivationTqslArgs, batchAdif } = require('./lib/lotw-split');
     // Live field values from the Settings dialog win over saved settings so
     // the button works before the operator hits Save.
     const location = (opts && opts.location) || settings.lotwStationLocation;
     const password = (opts && typeof opts.password === 'string') ? opts.password : settings.lotwCertPassword;
-    const tqsl = findTqsl(settings.tqslPath);
-    if (!tqsl) return { ok: false, message: 'TQSL not found — install TrustedQSL (arrl.org/tqsl) or set its path in Settings.' };
+    const tqsl = findTqsl((opts && typeof opts.tqslPath === 'string') ? opts.tqslPath : settings.tqslPath);
+    if (!tqsl) return { ok: false, message: `TQSL not found — install TrustedQSL (arrl.org/tqsl) or set where it is in ${TQSL_SETTING_PLACE}.` };
     if (!location) return { ok: false, message: 'Pick your TQSL Station Location first.' };
     const logPath = settings.adifLogPath || path.join(app.getPath('userData'), 'potacat_qso_log.adi');
     if (!fs.existsSync(logPath)) return { ok: false, message: 'No QSO log to upload yet.' };
@@ -47324,7 +47949,7 @@ function cloudShackNotice(text, kind) {
           // execFile failed BEFORE tqsl could report an exit code — the old
           // "unexpected code -1" hid the real reason (LZ3AW 2026-08-14).
           if (err.code === 'ENOENT') {
-            r = { ok: false, message: `TQSL could not be started — nothing runnable at ${tqsl}. Reinstall TrustedQSL or set its path in Settings.` };
+            r = { ok: false, message: `TQSL could not be started — nothing runnable at ${tqsl}. Reinstall TrustedQSL or set where it is in ${require('./lib/tqsl').TQSL_SETTING_PLACE}.` };
           } else if (err.killed || err.signal) {
             r = { ok: false, message: 'TQSL did not finish within 2 minutes and was stopped. It is probably showing a dialog window (first-run setup, an update prompt, or a question about the log) — open TQSL once by itself, dismiss any prompts, then try again.' };
           } else {
@@ -47784,9 +48409,9 @@ function cloudShackNotice(text, kind) {
     // preview-limited receivers (work item kiwi-preview-bump-too-busy);
     // parsed HERE because every surface funnels through this one intake —
     // desktop field, web client, and phone — so no UI needed a new field.
-    // NOTE: a station saved with the password inline lives in the plain
-    // station string; the discrete per-station field with settings-secrets
-    // registration is the follow-up before exports can carry SDR lists.
+    // The password lives in the plain station string; lib/settings-secrets.js
+    // declares it, so Settings > Export leaves it out and a Guest Pass never
+    // receives it.
     let hostIn = rawHost || '';
     let stationPassword = password;
     const atIdx = hostIn.lastIndexOf('@');
@@ -47990,6 +48615,7 @@ function cloudShackNotice(text, kind) {
     // The idle-RX session's own QSY (including WSPR band hops) must not read
     // as the operator returning — see markUserActive().
     markUserActive({ selfDriven: isIdleRxSelfAction(_e.sender) });
+    if (!isIdleRxSelfAction(_e.sender)) noteOwnerActivity('tune');
     if (_vfoLocked) {
       _e.sender.send('tune-blocked', 'VFO Locked — Unlock VFO to change frequency');
       return;
@@ -48214,10 +48840,17 @@ function cloudShackNotice(text, kind) {
       }
       case 'power-off': {
         // #152 rule 1: never switch the radio off under a remote client's over.
-        const offRefused = RigPower.powerOffRefusal({ source, transmitting: _isEffectivelyTransmitting() });
+        // #293: nor, from any surface, a radio POTACAT could not switch back on
+        // (caps.powerOff false) unless the operator allowed it for this rig.
+        let offCaps = null;
+        try { offCaps = getRigCapabilities(rigType); } catch { offCaps = null; }
+        const offRefused = RigPower.powerOffRefusal({
+          source, transmitting: _isEffectivelyTransmitting(),
+          offAllowed: offCaps && offCaps.power ? offCaps.powerOff : undefined,
+        });
         if (offRefused) {
-          sendCatLog('[Power] From a remote device: ' + offRefused);
-          if (remoteServer && remoteServer.running) remoteServer.sendToAsker({ type: 'tune-blocked', reason: offRefused });
+          sendCatLog('[Power] ' + (source === 'desktop' ? '' : 'From a remote device: ') + offRefused);
+          if (source !== 'desktop' && remoteServer && remoteServer.running) remoteServer.sendToAsker({ type: 'tune-blocked', reason: offRefused });
           break;
         }
         if (cat && cat.connected && rigType !== 'flex') {
@@ -48290,14 +48923,17 @@ function cloudShackNotice(text, kind) {
       }
       case 'set-tx-power': {
         if (tciRigTarget()) {
-          if (!tciTestRadio?.setDrive(data.value)) {
+          // TCI drive is a percentage. Convert the configured watt limit before applying it.
+          const limit = AmpDrive.currentFlexPctLimit();
+          const drive = limit > 0 ? Math.min(data.value, limit) : data.value;
+          if (!tciTestRadio?.setDrive(drive)) {
             broadcastRigState();
             pushJtcatPopoutRigPower(true);
           }
           break;
         }
         if (flexNeedsApi) { _flexWarnOnce('TX Power requires SmartSDR API — not connected'); break; }
-        const value = Number(data.value) || 0;
+        const value = AmpDrive.clampW(Number(data.value) || 0, activeAmpDriveLimitW()); // amplifier drive limit
         if (flexSdr()) {
           gatedSmartSdrTxPower(value);
         } else if (cat && cat.connected) {
@@ -49715,6 +50351,12 @@ function cloudShackNotice(text, kind) {
     if (!remoteClient || !remoteClient.passClaim) return { error: 'Not connected to a station' };
     return { ok: remoteClient.passClaim() };
   });
+  // Guest Pass "Take the radio" after the owner's 5 idle minutes (pass-state
+  // waiting / owner-idle, #200 step 4). The station answers with pass-state.
+  ipcMain.handle('remote-pass-take-back', () => {
+    if (!remoteClient || !remoteClient.passTakeBack) return { error: 'Not connected to a station' };
+    return { ok: remoteClient.passTakeBack() };
+  });
 
   ipcMain.handle('connection-targets-get-status', () => {
     if (_remoteClientAuthFail && _remoteClientAuthFail.targetId === settings.activeTargetId) {
@@ -50375,6 +51017,21 @@ function cloudShackNotice(text, kind) {
       modelName,
       protocol: cat.protocol || 'unknown',
     };
+  });
+
+  // The answer to the transmit audio input question (#594): saved on the rig,
+  // then CAT reconnects so the codec keys with the chosen command.
+  ipcMain.handle('set-tx-audio-input', (_e, data) => {
+    const rigId = data && data.rigId;
+    const choice = data && data.choice;
+    if (choice !== TxAudioInput.FRONT && choice !== TxAudioInput.REAR) return { ok: false };
+    const rig = (settings.rigs || []).find(r => r && r.id === rigId);
+    if (!rig || !TxAudioInput.hasChoice(rig.model)) return { ok: false };
+    rig.txAudioInput = choice;
+    saveSettings(settings);
+    sendCatLog(`[PTT] Transmit audio input for ${rig.model}: ${TxAudioInput.LABELS[choice]} — saved on this rig. Transmit again.`);
+    if (rig.id === settings.activeRigId) connectCatSafe('transmit audio input saved');
+    return { ok: true };
   });
 
   ipcMain.handle('save-rig-command-override', (_e, { key, value }) => {
@@ -52112,7 +52769,11 @@ function cloudShackNotice(text, kind) {
     if (first.success || first.portError) return first;
     // On Auto, a Kenwood-protocol Yaesu that does not answer with RTS low is
     // tried with RTS/CTS, as the live connect does (#103).
-    if (hs.source === 'model' && hs.handshake !== 'hardware' && !legacy && SerialHsTrial.trialApplies(model)) {
+    // Never on a port whose RTS keys PTT: raising it would transmit (#544).
+    const trialTarget = { ptt: config.ptt };
+    if (hs.source === 'model' && hs.handshake !== 'hardware' && !legacy && SerialHsTrial.trialSkipReason(model, trialTarget) === 'ptt-rts') {
+      sendCatLog(SerialHsTrial.pttRtsSkipLine(portPath));
+    } else if (hs.source === 'model' && hs.handshake !== 'hardware' && !legacy && SerialHsTrial.trialApplies(model, trialTarget)) {
       await new Promise((r) => setTimeout(r, 300));
       const second = await probeSerialCat({ portPath, baudRate, dtrOff, rtscts: true, stopBits: model.serialStopBits || 1, legacy });
       if (second.success) {
@@ -53167,6 +53828,19 @@ function cloudShackNotice(text, kind) {
       pushIcomNetworkVoiceChunk(mic);
       return;
     }
+    // SCU-LAN10: the same chunks while a voice PTT holds the LAN stream.
+    {
+      const lan = yaesuLanTransport();
+      if (lan && lan.voiceTxActive) {
+        let mic;
+        if (buf instanceof Float32Array) mic = buf;
+        else if (ArrayBuffer.isView(buf) || buf instanceof ArrayBuffer) mic = new Float32Array(buf);
+        else if (Array.isArray(buf)) mic = new Float32Array(buf);
+        else { try { mic = new Float32Array(Object.values(buf)); } catch { return; } }
+        pushYaesuLanVoiceChunk(mic);
+        return;
+      }
+    }
     if (!smartSdrAudio || !smartSdrAudio.txReady) return;
     // Only stream the phone's mic to the radio's dax_tx WHILE transmitting.
     // The renderer's dax_tx tap runs continuously once the iOS app's WebRTC
@@ -53346,6 +54020,7 @@ function cloudShackNotice(text, kind) {
               jtcatHeardGrids.note(uc, r.grid);
             }
             workedOverlayEnrichDecode(r, uc, currentBand, s.mode || 'FT8');
+            jtcatSpotRefEnrichDecode(r, uc, currentBand);
                         // CQ modifier (NA/EU/POTA/TEST...) for the watchlist tag highlighter.
         // A pure text parse - deliberately NOT gated on chase context. The
         // original insertion inherited an if(chaseCtx) guard from the line it
@@ -54316,9 +54991,11 @@ function cloudShackNotice(text, kind) {
   // --- CW Keyer IPC ---
   // Paddle events go through IambicKeyer, which generates key events -> xmit 1/0
   ipcMain.on('cw-paddle-dit', (_e, pressed) => {
+    if (pressed) noteOwnerActivity('cw');
     if (keyer) keyer.paddleDit(pressed);
   });
   ipcMain.on('cw-paddle-dah', (_e, pressed) => {
+    if (pressed) noteOwnerActivity('cw');
     if (keyer) keyer.paddleDah(pressed);
   });
   ipcMain.on('cw-set-wpm', (e, wpm) => {
@@ -54341,12 +55018,60 @@ function cloudShackNotice(text, kind) {
   // USB CODEC, so SSB-over-DATA's mode switch IS appropriate here when
   // the user has it enabled (never on a Yaesu: see handleRemotePtt).
   ipcMain.on('voice-macro-ptt', (_e, state) => {
-    // The window starts the recording with this request: a refusal stops it.
-    if (handleRemotePtt(!!state, { audio: true }) === false && win && !win.isDestroyed()) {
+    // SCU-LAN10: the window's stop (button, end, refusal) also ends the LAN
+    // stream, and unkeys only a macro's own transmission.
+    if (!state && yaesuLanVoiceRoute()) { endYaesuLanTx('macro', 'voice macro stop'); return; }
+    // The window starts the recording with this request: a refusal stops it,
+    // in the window that plays it (the main window or the VFO window).
+    if (handleRemotePtt(!!state, { audio: true }) === false) {
       sendCatLog('[Voice] macro stopped: transmit was refused');
-      win.webContents.send('stop-voice-macro');
+      stopVoiceMacroIn(_e.sender);
     }
   });
+  // The macro's own window: the main window, or the VFO window's macro bar.
+  function stopVoiceMacroIn(sender) {
+    try { if (sender && !sender.isDestroyed()) sender.send('stop-voice-macro'); } catch {}
+  }
+  function voiceMacroWhere(sender) {
+    return vfoPopoutWin && !vfoPopoutWin.isDestroyed() && sender === vfoPopoutWin.webContents
+      ? ['vfo', 'echocat'] : ['main', 'echocat'];
+  }
+  // SCU-LAN10 (#227): a voice macro, decoded by the window at 16 kHz, sent
+  // over the LAN. The radio stays in USB/LSB, as for live voice. Main unkeys
+  // when the recording is out (or failed), then tells the window with
+  // 'stop-voice-macro'; it does not wait on the window's round trip.
+  ipcMain.on('voice-macro-lan', (_e, payload) => {
+    const stop = () => stopVoiceMacroIn(_e.sender);
+    const samples = payload && payload.samples instanceof Float32Array ? payload.samples
+      : (payload && payload.samples ? new Float32Array(Object.values(payload.samples)) : null);
+    const rate = Number(payload && payload.sampleRate) || Sculan10.TX_AUDIO_RATE;
+    if (!samples || !samples.length) { stop(); return; }
+    if (!yaesuLanBufferTxReady()) {
+      sendCatLog('[Voice] macro not sent: the Yaesu LAN session is not up');
+      stop();
+      return;
+    }
+    if (claimYaesuLanTx('macro', `voice macro "${(payload && payload.label) || ''}"`, voiceMacroWhere(_e.sender))) { stop(); return; }
+    if (handleRemotePtt(true, { audio: true, lanOwner: 'macro' }) === false) {
+      releaseYaesuLanTx('macro', 'voice macro refused');
+      sendCatLog('[Voice] macro stopped: transmit was refused');
+      stop();
+      return;
+    }
+    const txAudio = conditionDirectTxAudio(samples, 1, 1.0);
+    sendCatLog(`[Voice] macro "${(payload && payload.label) || ''}" over the Yaesu LAN: ${(samples.length / rate).toFixed(1)} s @ ${rate} Hz; ${formatDirectTxAudioStats(txAudio)}`);
+    const lan = yaesuLanTransport();
+    if (!lan) { endYaesuLanTx('macro', 'voice macro: no LAN session'); stop(); return; }
+    lan.sendTxAudio(txAudio.samples, { offsetMs: 0, inputSampleRate: rate, startDelayMs: 150, tailSilenceMs: 200 })
+      .then(() => { endYaesuLanTx('macro', 'voice macro done'); stop(); })
+      .catch((e) => {
+        if (e && e.message === 'TX cancelled') return; // the stop that cancelled it unkeys
+        sendCatLog(`[Voice] macro over the Yaesu LAN failed: ${e.message}`);
+        endYaesuLanTx('macro', 'voice macro failed');
+        stop();
+      });
+  });
+
   // Every surface's macro buttons show what is on the air.
   ipcMain.on('voice-macro-playing', (_e, info) => {
     if (remoteServer && remoteServer.broadcastVoiceMacroPlaying) {
@@ -54367,6 +55092,8 @@ function cloudShackNotice(text, kind) {
       handleRemotePtt(!!state, icomLanVoicePttOpts());
       return;
     }
+    // SCU-LAN10: the window's mic over the LAN (#227).
+    if (yaesuLanVoicePtt(!!state, 'VFO window PTT', 'vfo')) return;
     handleRemotePtt(!!state, { audio: false });
   });
   // #170: the VFO window's PC mic on that press, as one plain log line.
@@ -54432,6 +55159,7 @@ function cloudShackNotice(text, kind) {
   // Desktop CW text sending (macros)
   ipcMain.on('send-cw-text', (_e, text, opts) => {
     if (isRemoteMode()) { sendRemoteCwText(text, opts); return; }
+    noteOwnerActivity('cw');
     sendCwTextToRadio(text, opts);
   });
   // Desktop CW cancel / abort — fires from the ESC button in the main
@@ -54622,11 +55350,10 @@ function gracefulCleanup() {
   // Last thing: stamp the clean-exit marker. Reaching here means we shut down
   // on purpose, so the next launch will not report a crash. Anything that
   // kills us before this point deliberately leaves the marker absent.
-  try {
-    if (_cleanExitMarkerPath) fs.writeFileSync(_cleanExitMarkerPath, new Date().toISOString());
-  } catch {}
+  CleanExitMarker.stampCleanExit(_cleanExitMarkerPath, fs);
 }
 
+let _yaesuLanQuitDone = false;
 app.on('before-quit', (e) => {
   if (jtcatLogReviews.size) {
     // Written while the log, QRZ and the rig are all still up.
@@ -54637,6 +55364,26 @@ app.on('before-quit', (e) => {
   winlinkHoldAwake(false); // never leave the Winlink session's App Nap block behind (#187)
   // A Winlink return still pending (#187): the radio goes back while CAT is up.
   if (winlinkReturnBeforeQuit(() => app.quit())) { e.preventDefault(); return; }
+  // SCU-LAN10: unkey (TX0; read back) and put the radio's monitor back
+  // (paced, read back) before the process goes, at most 5 s. A radio that
+  // may still be keyed with no session to reach it is said out loud.
+  {
+    const lan = yaesuLanTransport();
+    if (lan && !_yaesuLanQuitDone && (lan.mayBeKeyed || Object.keys(lan.monitorSaved).length)) {
+      _yaesuLanQuitDone = true;
+      if (!lan.connected && lan.mayBeKeyed) {
+        sendCatLog('[SCU-LAN10] WARNING: quitting while the radio may be keyed and the unit is not reachable');
+        try { dialog.showMessageBoxSync({ type: 'warning', title: 'POTACAT', message: 'POTACAT could not reach the radio to unkey it. It may still be transmitting.', detail: 'Check the radio, or switch it off.' }); } catch {}
+      } else if (lan.connected) {
+        e.preventDefault();
+        let closed;
+        try { closed = lan.disconnect(); } catch {}
+        Promise.race([Promise.resolve(closed), new Promise((r) => setTimeout(r, 5000))])
+          .finally(() => setTimeout(() => app.quit(), 350)); // the sockets linger 300 ms for the last packets
+        return;
+      }
+    }
+  }
   gracefulCleanup();
   // Shutdown watchdog: if quit stalls after cleanup (a pending async close, a
   // wedged device handle), the process lingers headless and the NEXT

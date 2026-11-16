@@ -2085,6 +2085,13 @@
               <option value="vox">The audio interface keys it (SignaLink, the radio's VOX)</option>
             </select>
           </label>
+          <div id="serialcat-ptt-conflict" class="rig-ptt-conflict hidden" role="alert">
+            <span id="serialcat-ptt-conflict-text"></span>
+            <div class="rig-ptt-conflict-actions">
+              <button type="button" data-ptt-fix="rts-held-low">Hold RTS low</button>
+              <button type="button" data-ptt-fix="ptt-over-cat">Key over CAT instead</button>
+            </div>
+          </div>
           <span class="help-text" style="margin-top:2px;display:block;">CAT still tunes and changes mode. Choose <b>The audio interface keys it</b> when a SignaLink or similar on the radio's data jack (TS-2000 ACC2) does the keying: over CAT some radios transmit from the front microphone, so the interface's audio never goes out.</span>
           <div style="margin-top:6px;display:flex;align-items:center;gap:8px;">
             <button type="button" id="serialcat-test-btn">Test Connection</button>
@@ -2240,9 +2247,9 @@
           </div>
           <span class="help-text" style="margin-top:6px;display:block;">CAT plus RS-BA1 receive/transmit audio. With Audio source set to Icom Network audio, POTACAT receives radio audio over UDP for JTCAT/SSTV decoding and can send JTCAT FT8/FT4 audio directly over the radio's RS-BA1 TX stream. Network TX gain scales the IP audio drive before it reaches the radio; use it with the JTCAT TX Pwr slider and the radio's LAN MOD gain to get clean output with little or no ALC.</span>
         </div>
-        <label class="radio-label"><input type="radio" name="radio-type" value="yaesu-lan"> Yaesu LAN (SCU-LAN10), experimental <span style="font-size:10px;color:var(--text-tertiary);">— CAT + receive audio</span></label>
+        <label class="radio-label"><input type="radio" name="radio-type" value="yaesu-lan"> Yaesu LAN (SCU-LAN10), experimental <span style="font-size:10px;color:var(--text-tertiary);">— CAT + receive and transmit audio</span></label>
         <div id="yaesu-lan-config" class="radio-sub hidden">
-          <span class="help-text" style="font-size:12px;">For the FTDX10, FT-710 and FTDX101D/MP with a Yaesu SCU-LAN10. Pick the radio in Radio Model above. One program at a time: close PCC-LAN10 first. For use away from home, reach the unit through Tailscale or a VPN, because the link is not really encrypted. Transmit audio over the LAN is not supported yet. New and untested on real units: after you try it, please send a report with Report a Bug in the Settings sidebar.</span>
+          <span class="help-text" style="font-size:12px;">For the FTDX10, FT-710 and FTDX101D/MP with a Yaesu SCU-LAN10. Pick the radio in Radio Model above. One program at a time: close PCC-LAN10 first. For use away from home, reach the unit through Tailscale or a VPN, because the link is not really encrypted. Voice from the VFO window's PTT or ECHOCAT is transmitted over the LAN, and so are voice macros, JTCAT (FT8/FT4), Tune and SSTV (the radio's menu setting for it is under Setup instructions); Winlink needs the radio's USB sound card on this computer for now. New and untested on real units: after you try it, please send a report with Report a Bug in the Settings sidebar.</span>
           <label>Address:
             <input type="text" id="set-yaesu-lan-host" placeholder="192.168.49.1" value="192.168.49.1">
           </label>
@@ -2255,11 +2262,14 @@
           <label>Password:
             <input type="password" id="set-yaesu-lan-password" autocomplete="off" placeholder="defaultuser">
           </label>
+          <label class="checkbox-label" id="yaesu-lan-mute-monitor-row" title="FT-710 and FTDX10 for now: the monitor is known to be set per mode there. The radio's monitor and CW sidetone play on its own speaker while you transmit from afar. POTACAT sets them to off and 0 in each mode you use and puts them back when it disconnects.">
+            <input type="checkbox" id="set-yaesu-lan-mute-monitor"> Mute the radio's speaker monitor and CW sidetone while POTACAT has the radio
+          </label>
           <div style="margin-top:6px;display:flex;align-items:center;gap:8px;">
             <button type="button" id="yaesu-lan-test-btn">Test Connection</button>
             <span id="yaesu-lan-test-result" style="font-size:12px;"></span>
           </div>
-          <span class="help-text" style="margin-top:6px;display:block;">The base port is the first of four UDP ports (CAT, audio and scope follow it). Blank user and password use the unit's factory login. With Audio source set to Yaesu LAN audio, JTCAT and SSTV decode the radio's audio over the network; to transmit FT8, SSTV or voice from POTACAT, set Audio source to the radio's USB sound card on this computer instead.</span>
+          <span class="help-text" style="margin-top:6px;display:block;">The base port is the first of four UDP ports (CAT, audio and scope follow it). Blank user and password use the unit's factory login. With Audio source set to Yaesu LAN audio, receive and transmit audio both go over the network (Winlink excepted). The monitor option (FT-710, FTDX10) sets the radio's monitor off and its level to 0 (the CW sidetone follows the level) in each mode you use, and puts every mode back when POTACAT disconnects or quits.</span>
         </div>
         <label class="radio-label"><input type="radio" name="radio-type" value="hamlib"> Other Rig (Hamlib)</label>
         <div id="hamlib-config" class="radio-sub hidden">
@@ -2408,6 +2418,27 @@
             <span class="help-text" style="margin-left:24px;display:block;">For a Yaesu with a tuner on its TUNER jack (FT-710 + mAT-30): the radio runs the tune, then switches the tuner off. With this on, POTACAT watches the cycle and sends AC001; the moment the radio reports the tuner off, so it stays online.</span>
           </div>
         </details>
+        <div id="rig-power-off-allow" style="margin-top:8px;">
+          <label class="checkbox-label"><input type="checkbox" id="set-allow-power-off"> Allow Power Off for a radio POTACAT cannot turn back on</label>
+          <span class="help-text" style="display:block;margin:2px 0 0 24px;">Most radios carry their computer connection on their own USB cable. Once the radio is off, that connection is gone, so POTACAT, ECHOCAT and a guest can switch the radio off but not back on. POTACAT therefore hides Power Off for such a radio. Tick this only if someone can reach the radio's power switch, or you know Power On works on your setup. A radio on a Yaesu SCU-LAN10 can always be switched back on and does not need this.</span>
+        </div>
+        <div id="rig-amp-drive" style="margin-top:8px;">
+          <label class="checkbox-label"><input type="checkbox" id="set-amp-drive-on"> An amplifier is connected: limit the drive power</label>
+          <label style="display:block;margin:4px 0 0 24px;">Never drive above (W):
+            <input type="number" id="set-amp-drive-w" min="0.1" max="2000" step="0.1" value="10" style="width:70px;">
+          </label>
+          <span class="help-text" style="display:block;margin:2px 0 0 24px;">For an amplifier that needs little drive. POTACAT, ECHOCAT, a guest, FT8, WSPR, Winlink and Tune never set this radio's power above this, and every power slider stops there. If the radio reports more (from its own knob or another program), POTACAT turns it back down. Commands you type yourself in the rig panel's Commands tab are sent as written.</span>
+        </div>
+        <div id="rig-tx-audio-input" class="hidden" style="margin-top:8px;">
+          <label>Transmit audio input:
+            <select id="set-tx-audio-input" style="margin-top:2px;">
+              <option value="">Ask on first transmit</option>
+              <option value="rear">Rear (data / ACC2 socket)</option>
+              <option value="front">Front (microphone jack)</option>
+            </select>
+          </label>
+          <span class="help-text" style="display:block;margin:2px 0 0 0;">The socket your sound card interface is plugged into. POTACAT tells the radio which one to send each time it transmits; the wrong one puts a carrier on the air with no audio.</span>
+        </div>
         <div id="rig-voice-as-data" style="margin-top:8px;">
           <label class="checkbox-label"><input type="checkbox" id="set-voice-as-data"> Voice in DATA mode (USB-D / LSB-D)</label>
           <span class="help-text" style="display:block;margin:2px 0 0 24px;">For radios whose data port is silent in USB and LSB, such as the Xiegu G90: POTACAT puts the radio in USB-D or LSB-D for voice, so receive audio reaches your sound card interface and ECHOCAT. Contacts are still logged as SSB. The radio's own microphone is off in these modes, so voice has to come in through the data port.</span>
@@ -2451,7 +2482,15 @@
                 </select>
               </label>
               <label title="Frequency correction for the dongle's crystal">PPM: <input type="number" id="set-sdr-scope-ppm" min="-200" max="200" value="0" style="width:60px;"></label>
-              <label title="Added to the radio's dial before the SDR tunes: an upconverter (e.g. 125000000), or a radio's IF output">Offset (Hz): <input type="number" id="set-sdr-scope-offset" value="0" style="width:110px;"></label>
+              <label title="Where the SDR's antenna input is connected">The SDR is connected to:
+                <select id="set-sdr-scope-tap">
+                  <option value="follow">An antenna, or the radio's RX OUT (moves with the dial)</option>
+                  <option value="fixedIf">The radio's IF output (stays on one frequency)</option>
+                </select>
+              </label>
+              <label id="sdr-scope-offset-wrap" title="Added to the radio's dial before the SDR tunes, for an upconverter (e.g. 125000000)">Offset (Hz): <input type="number" id="set-sdr-scope-offset" value="0" style="width:110px;"></label>
+              <label id="sdr-scope-if-wrap" title="The frequency of the radio's IF output, from the radio's manual (for example 9005000 on an FTDX101)">IF frequency (Hz): <input type="number" id="set-sdr-scope-if" min="0" value="0" style="width:110px;"></label>
+              <span id="sdr-scope-invert-wrap"><label class="checkbox-label" title="Tick this if signals above the dial show below it on the scope"><input type="checkbox" id="set-sdr-scope-invert"> The radio's IF is upside down (mirror the picture)</label></span>
               <label class="checkbox-label" id="sdr-scope-prefer-wrap" title="The FT-710 has its own USB band scope; tick this to show the SDR instead"><input type="checkbox" id="set-sdr-scope-prefer"> Use the SDR instead of the FT-710's own scope</label>
             </div>
           </div>
@@ -3002,7 +3041,12 @@
           <label class="checkbox-label"><input type="checkbox" id="set-lotw-enable"> Upload to ARRL Logbook of the World (via TQSL)</label>
           <span class="help-text" style="margin-left:12px;display:block;">Signs and uploads your POTACAT log with your own TrustedQSL install and callsign certificate. QSOs already at LoTW are skipped automatically.</span>
           <div id="lotw-config" class="hidden" style="margin-left:12px;margin-top:6px;">
-            <div id="lotw-missing" class="hidden help-text" style="margin-bottom:6px;">TQSL was not found. Install <a href="https://www.arrl.org/tqsl-download" id="lotw-tqsl-link" data-external>TrustedQSL</a>, create your callsign certificate and a Station Location in it, then reopen Settings.</div>
+            <div id="lotw-missing" class="hidden help-text" style="margin-bottom:6px;">TQSL was not found. Install <a href="https://www.arrl.org/tqsl-download" id="lotw-tqsl-link" data-external>TrustedQSL</a> and create your callsign certificate and a Station Location in it. If it is installed somewhere else, choose it under TQSL program below.</div>
+            <label style="display:block;margin-bottom:4px;">TQSL program:
+              <input type="text" id="set-lotw-tqsl-path" placeholder="found for you; leave blank" style="width:230px;" autocomplete="off" spellcheck="false">
+              <button type="button" id="lotw-tqsl-browse">Browse&hellip;</button>
+            </label>
+            <span id="lotw-tqsl-found" class="help-text" style="display:block;margin-bottom:6px;">Leave blank and POTACAT looks in the usual places, including a Flatpak install on Linux.</span>
             <label>Station Location:
               <select id="set-lotw-location" style="min-width:180px;"><option value="">Select...</option></select>
             </label>
@@ -3642,7 +3686,7 @@
       <!-- Voice Macros -->
       <div style="margin-top:12px;border-top:1px solid #333;padding-top:8px;">
         <span style="font-size:12px;font-weight:bold;color:var(--text);">Voice Macros</span>
-        <span class="help-text" style="display:block;margin-top:2px;">Record mic audio to play as voice macros during SSB/FM. Max 30s each. Plays through the rig's TX audio output.</span>
+        <span class="help-text" style="display:block;margin-top:2px;">Record mic audio to play as voice macros during SSB/FM. Max 30s each. Plays through the rig's TX audio output, or over the LAN on a Yaesu SCU-LAN10 with Yaesu LAN audio.</span>
         <div id="voice-macro-editor" style="margin-top:6px;display:flex;flex-direction:column;gap:4px;"></div>
       </div>
       <!-- Hotkeys -->
@@ -4384,6 +4428,18 @@
     <div id="park-state-options" class="dialog-buttons" style="justify-content:flex-start;flex-wrap:wrap;margin-top:0;"></div>
     <div class="dialog-buttons">
       <button type="button" id="park-state-blank">Leave Blank</button>
+    </div>
+  </dialog>
+
+  <dialog id="tx-audio-input-dialog">
+    <h3 id="tx-audio-input-title">Where is your audio interface plugged into the radio?</h3>
+    <p id="tx-audio-input-text" class="help-text" style="margin-bottom:12px;max-width:440px;"></p>
+    <div class="dialog-buttons" style="justify-content:flex-start;flex-wrap:wrap;margin-top:0;">
+      <button type="button" id="tx-audio-input-rear">Rear (data / ACC2 socket)</button>
+      <button type="button" id="tx-audio-input-front">Front (microphone jack)</button>
+    </div>
+    <div class="dialog-buttons">
+      <button type="button" id="tx-audio-input-later">Not now</button>
     </div>
   </dialog>
 
@@ -5440,15 +5496,19 @@
   <script src="../lib/pass-wording.js"></script>
   <script src="../lib/net-reminder-row.js"></script>
   <script src="../lib/rig-family.js"></script>
+  <script src="../lib/tx-audio-input.js"></script>
+  <script src="../lib/ptt-flow-conflict.js"></script>
   <script src="../lib/waterfall-palettes.js"></script>
   <script src="../lib/app-theme.js"></script>
   <script src="../lib/look-picker.js"></script>
   <script src="../lib/rig-bands.js"></script>
+  <script src="../lib/spot-band-filter.js"></script>
   <script src="../lib/listen-source.js"></script>
   <script src="../lib/channels.js"></script>
   <script src="../lib/favorites.js"></script>
   <script src="channels-view.js"></script>
   <script src="../lib/landmarks.js"></script>
+  <script src="../lib/directory-key-nav.js"></script>
   <script src="../lib/commander-sequences.js"></script>
   <script src="../lib/spot-row.js"></script>
   <script src="../lib/map-marker-reconcile.js"></script>

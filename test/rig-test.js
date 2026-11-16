@@ -267,17 +267,46 @@ test('FT-991A: split on/off is FT3;/FT2;, reported at once and confirmed with FT
   assert.ok(!writes.some((w) => /^ST/.test(w)), 'ST is not a 991A command');
 });
 
-test('FT-991A and FT-891: filter width is SH0nn from the 991A chart', () => {
+test('FT-891: filter width is SH01nn (WIDTH on + index), SSB chart from its CAT reference p. 17', () => {
   const { RIG_MODELS } = require('../lib/rig-models');
-  for (const id of ['FT-991/991A', 'FT-891']) {
+  const { codec, writes } = captureWrites(KenwoodCodec, RIG_MODELS['FT-891']);
+  codec._lastParsedMode = 'USB';
+  codec.setFilterWidth(200);    // index 01
+  codec.setFilterWidth(2200);   // index 12
+  codec.setFilterWidth(2400);   // index 14
+  codec.setFilterWidth(3000);   // index 20
+  codec._lastParsedMode = 'CW';
+  codec.setFilterWidth(500);    // index 10
+  assert.deepStrictEqual(writes, ['SH0101;', 'SH0112;', 'SH0114;', 'SH0120;', 'SH0110;']);
+});
+
+test('FT-891: RF gain is RG0 000-030 (CAT reference rev 1909-C, PDF p. 16); other Yaesu stay 000-255', () => {
+  const { RIG_MODELS } = require('../lib/rig-models');
+  const { codec, writes } = captureWrites(KenwoodCodec, RIG_MODELS['FT-891']);
+  codec.setRfGain(0); codec.setRfGain(25); codec.setRfGain(50); codec.setRfGain(100); codec.setRfGain(140);
+  assert.deepStrictEqual(writes, ['RG0000;', 'RG0008;', 'RG0015;', 'RG0030;', 'RG0030;']);
+  const seen = [];
+  codec.on('rfgain', (v) => seen.push(v));
+  codec.onData('RG0030;RG0015;RG0000;');
+  assert.deepStrictEqual(seen, [100, 50, 0]);
+  for (const id of ['FT-710', 'FTDX10', 'FT-991/991A']) {
+    const o = captureWrites(KenwoodCodec, RIG_MODELS[id]);
+    o.codec.setRfGain(50); o.codec.setRfGain(100);
+    assert.deepStrictEqual(o.writes, ['RG0128;', 'RG0255;'], id);
+  }
+});
+
+test('FT-991A: filter width is SH0nn from the 991A chart', () => {
+  const { RIG_MODELS } = require('../lib/rig-models');
+  for (const id of ['FT-991/991A']) {
     const { codec, writes } = captureWrites(KenwoodCodec, RIG_MODELS[id]);
     codec._lastParsedMode = 'USB';
-    codec.setFilterWidth(2400);   // index 13 on the 991A chart
+    codec.setFilterWidth(2400);   // index 14 on the 991A chart (CAT reference p. 16)
     codec.setFilterWidth(3000);   // index 20 (the FTDX chart would say 19)
     codec._lastParsedMode = 'CW';
     codec.setFilterWidth(500);    // index 10
     codec.setFilterWidth(2400);   // index 16
-    assert.deepStrictEqual(writes, ['SH013;', 'SH020;', 'SH010;', 'SH016;'], id);
+    assert.deepStrictEqual(writes, ['SH014;', 'SH020;', 'SH010;', 'SH016;'], id);
   }
 });
 

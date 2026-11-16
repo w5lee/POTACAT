@@ -86,12 +86,15 @@ for (const id of ['FTX-1 Field', 'FTX-1 Optima']) {
   });
 }
 
-test('every keyer-memory rig plays the memory it wrote (KY0n; names kmMemory n)', () => {
+// KY0n; on the FT-710 and FTX-1 (KY P1 P2: P1 0 = TEXT memory); KYn; on the
+// FT-991A and FT-891, whose KY has one parameter, P1 1-5 = keyer memory n
+// (FT-991A CAT reference rev 1711-D p. 11, FT-891 rev 1909-C p. 11).
+test('every keyer-memory rig plays the memory it wrote (KY0n; or KYn; names kmMemory n)', () => {
   for (const [id, m] of Object.entries(RIG_MODELS)) {
     const cw = m && m.cw;
     if (!cw || cw.kyMode !== 'km' || !cw.kmPlay) continue;
-    const mm = /^KY0([1-5]);$/.exec(cw.kmPlay);
-    assert.ok(mm, `${id}: kmPlay ${cw.kmPlay} is not KY0n;`);
+    const mm = /^KY0?([1-5]);$/.exec(cw.kmPlay);
+    assert.ok(mm, `${id}: kmPlay ${cw.kmPlay} is not KY0n; or KYn;`);
     assert.strictEqual(Number(mm[1]), cw.kmMemory, `${id}: KM writes ${cw.kmMemory} but ${cw.kmPlay} plays ${mm[1]}`);
   }
 });
@@ -386,6 +389,34 @@ test('a Yaesu message then an Icom-path message does not keep the watch armed', 
   r.disconnect();
 });
 
+// #582 (DA2PK, FT-710): TX0; is ignored while the radio plays a keyer
+// memory, so Stop let the message run on. Where the CAT manual has a stop
+// (KY P2 0: FT-710 2306-C p.14, FTX-1 2508-C p.18), Stop sends it first and
+// TX0; after, byte for byte. Radios whose manual has none keep TX0; alone.
+for (const id of ['FT-710', 'FTX-1 Field', 'FTX-1 Optima']) {
+  test(`${id}: Stop sends KY00; then TX0; (#582)`, async () => {
+    const { rig: r, writes } = rig(id);
+    r.sendCwText('TEST DE DA2PK');
+    await sleep(20);
+    writes.length = 0;
+    r.stopCwText();
+    assert.deepStrictEqual(writes.filter((w) => /^KY|^TX/.test(w)), ['KY00;', 'TX0;'], JSON.stringify(writes));
+    r.disconnect();
+  });
+}
+for (const id of ['FTDX10', 'FTDX101D/MP', 'FT-991/991A', 'FT-891']) {
+  test(`${id}: no stop in its CAT manual, Stop sends TX0; only (#582)`, async () => {
+    const { rig: r, writes } = rig(id);
+    r.sendCwText('TEST');
+    await sleep(20);
+    writes.length = 0;
+    r.stopCwText();
+    assert.ok(!writes.some((w) => /^KY/.test(w)), 'no KY on stop: ' + JSON.stringify(writes));
+    assert.ok(writes.includes('TX0;'), 'TX0; still sent: ' + JSON.stringify(writes));
+    r.disconnect();
+  });
+}
+
 test('Stop ends the TX state at once, on a radio that sends no readback', async () => {
   const { rig: r, codec } = rig('TS-480');
   const states = [];
@@ -424,7 +455,8 @@ test('ECHOCAT: an unchanged speed sends the radio no speed command ahead of the 
 
 test('N8JMS: a frequency event keeps the selected spot, and a map Tune finds its own call', () => {
   const app = readSrc(require('path').join(__dirname, '..', 'renderer', 'app.js'));
-  assert.ok(/const onSpot = onPicked \? lastTunedSpot : allSpots\.find/.test(app));
+  // #502: the fallback is the live (not aged-out) spot at the frequency.
+  assert.ok(/const onSpot = onPicked \? lastTunedSpot : liveSpotAtFreq\(/.test(app));
   assert.ok(/s\.callsign === btn\.dataset\.call/.test(app));
   assert.ok(/class="tune-btn" data-call=/.test(app));
 });

@@ -1212,15 +1212,24 @@ window.api.onRadioState((s) => {
   // inline display of '' fell back to the stylesheet's none, so the block
   // never appeared on any radio.
   if (s.power != null) {
+    // #293: a radio that shows neither button (off-only, and Power Off not
+    // allowed) gets no block at all.
+    const shown = !!s.power && !(s.powerOn === false && s.powerOff === false);
     const sec = document.getElementById('sec-power');
-    sec.style.display = s.power ? '' : 'none';
-    sec.classList.toggle('visible', !!s.power);
+    sec.style.display = shown ? '' : 'none';
+    sec.classList.toggle('visible', shown);
   }
   // #485: a radio that can be switched off over CAT but not on (the FTX-1)
   // shows Power Off alone. Absent powerOn (an older main) keeps both.
   if (s.powerOn != null) {
     const onBtn = document.getElementById('vfo-power-on');
     if (onBtn) onBtn.style.display = s.powerOn ? '' : 'none';
+  }
+  // #293: no Power Off where POTACAT could not switch the radio back on and
+  // the operator has not allowed it for this rig. Absent (an older main) shows it.
+  if (s.powerOff != null) {
+    const offBtn = document.getElementById('vfo-power-off');
+    if (offBtn) offBtn.style.display = s.powerOff ? '' : 'none';
   }
   // Active VFO + split badges — readback-fed from the radio (LZ3AW). The
   // VFO badge only appears once the rig reports B at least this session,
@@ -3466,7 +3475,9 @@ async function pttStart() {
         (s.catTarget && s.catTarget.type === 'k4-network') ||
         // Icom Network: the mic goes to the radio over RS-BA1. The legacy
         // branch played it on this computer's speakers (KG5EIU IC-9700 feedback).
-        (s.audioSource === 'icom-network');
+        (s.audioSource === 'icom-network') ||
+        // Yaesu SCU-LAN10: the mic goes to the radio over the LAN (#227).
+        (s.audioSource === 'yaesu-lan' && s.catTarget && s.catTarget.type === 'yaesu-lan');
 
       if (isDaxTxDirect && window.api.daxTxChunk) {
         txPath = 'direct';
@@ -3952,6 +3963,19 @@ async function playVoiceMacro(idx, btn, outputDeviceId) {
       'but no audio reaches the air. Switch to a voice mode and try again.');
     return;
   }
+  // Yaesu SCU-LAN10 (#227): the radio's audio is the LAN, not a sound card,
+  // so no output device is needed. Same path as the main window's macro bar.
+  const s = await window.api.getSettings();
+  if (s.audioSource === 'yaesu-lan' && s.catTarget && s.catTarget.type === 'yaesu-lan' && window.api.voiceMacroLan) {
+    stopVoicePlayback();
+    const b64 = await window.api.voiceMacroLoad(idx);
+    if (!b64) return;
+    const bin = atob(b64);
+    const raw = new Uint8Array(bin.length);
+    for (let j = 0; j < bin.length; j++) raw[j] = bin.charCodeAt(j);
+    playVoiceMacroLan(raw, idx, btn);
+    return;
+  }
   if (!outputDeviceId) {
     const ok = confirm('Voice macros play audio through the system audio output and need that ' +
       'output routed to the radio (FLEX DAX-IN, a virtual audio cable, etc.). No output device is ' +
@@ -3983,6 +4007,29 @@ async function playVoiceMacro(idx, btn, outputDeviceId) {
     voicePlaybackSource.onended = () => stopVoicePlayback();
   });
 }
+
+// The recording decoded at 16 kHz, mixed to mono and handed to main, which
+// keys the radio, sends it over the LAN and says 'stop-voice-macro' when it
+// is out (or refused). Nothing plays on this computer's speakers.
+function playVoiceMacroLan(bytes, idx, btn) {
+  voicePlaybackCtx = new AudioContext({ sampleRate: 16000 });
+  voicePlaybackCtx.decodeAudioData(bytes.buffer, (audioBuffer) => {
+    const n = audioBuffer.length, chs = audioBuffer.numberOfChannels;
+    const mono = new Float32Array(n);
+    for (let c = 0; c < chs; c++) {
+      const d = audioBuffer.getChannelData(c);
+      for (let i = 0; i < n; i++) mono[i] += d[i] / chs;
+    }
+    voicePlayingIdx = idx;
+    btn.classList.add('active');
+    window.api.voiceMacroLan({ samples: mono, sampleRate: audioBuffer.sampleRate, label: btn.textContent || '' });
+  }, (err) => {
+    console.warn('[VFO] Could not decode the recording:', err && err.message);
+    stopVoicePlayback();
+  });
+}
+// main ends the macro (out, refused, failed): the button goes back.
+if (window.api.onStopVoiceMacro) window.api.onStopVoiceMacro(() => { if (voicePlayingIdx >= 0) stopVoicePlayback(); });
 
 function stopVoicePlayback() {
   if (voicePlaybackSource) { try { voicePlaybackSource.stop(); } catch {} voicePlaybackSource = null; }

@@ -37,6 +37,8 @@ contextBridge.exposeInMainWorld('api', {
   // Generic main→renderer toast ({message, warn?, duration?}) — radio-link
   // transitions etc. Rendered via showLogToast in app.js.
   onAppNotice: (cb) => ipcRenderer.on('app-notice', (_e, data) => cb(data)),
+  onTxAudioInputAsk: (cb) => ipcRenderer.on('tx-audio-input-ask', (_e, data) => cb(data)),
+  setTxAudioInput: (data) => ipcRenderer.invoke('set-tx-audio-input', data),
   // A QSO reached the log, whatever path logged it (saveQsoRecord is the one
   // choke point). Drives the QSO-logged chime.
   onQsoLogged: (cb) => ipcRenderer.on('qso-logged', (_e, q) => cb(q)),
@@ -149,6 +151,7 @@ contextBridge.exposeInMainWorld('api', {
     return () => ipcRenderer.removeListener('remote-pass-state', handler);
   },
   remotePassClaim: () => ipcRenderer.invoke('remote-pass-claim'),
+  remotePassTakeBack: () => ipcRenderer.invoke('remote-pass-take-back'),
   onRemotePassHold: (cb) => {
     const handler = (_e, info) => cb(info || {});
     ipcRenderer.on('remote-pass-hold', handler);
@@ -394,7 +397,7 @@ contextBridge.exposeInMainWorld('api', {
   macMicCaptureStart: (surface) => ipcRenderer.invoke('mac-mic-capture-start', surface),
   macMicSilence: (o) => ipcRenderer.send('mac-mic-silence', o),
   onMacMicNotice: (cb) => ipcRenderer.on('mac-mic-notice', (_e, d) => cb(d)),
-  lotwLocations: () => ipcRenderer.invoke('lotw-locations'),
+  lotwLocations: (opts) => ipcRenderer.invoke('lotw-locations', opts || {}),
   lotwUpload: (opts) => ipcRenderer.invoke('lotw-upload', opts),
   lotwDownloadConfirmations: (opts) => ipcRenderer.invoke('lotw-download-confirmations', opts),
   clublogUpload: (opts) => ipcRenderer.invoke('clublog-upload', opts),
@@ -594,6 +597,8 @@ contextBridge.exposeInMainWorld('api', {
   cwStop: () => ipcRenderer.send('cw-stop'),
   sendCwText: (text, opts) => ipcRenderer.send('send-cw-text', text, opts),
   voiceMacroPtt: (state) => ipcRenderer.send('voice-macro-ptt', state),
+  // SCU-LAN10 (#227): the decoded recording, 16 kHz mono, for main to send over the LAN.
+  voiceMacroLan: (payload) => ipcRenderer.send('voice-macro-lan', payload),
   exportSettings: () => ipcRenderer.invoke('export-settings'),
   importSettings: () => ipcRenderer.invoke('import-settings'),
   relaunch: () => ipcRenderer.send('app-relaunch'),

@@ -471,6 +471,28 @@ function pushJtcatSpotsHighlight(filtered) {
 // 0.5 kHz, so the log opened blank under a filled card (K3SBP 2026-10-17).
 let vfoCardSpot = null;
 
+// A spot at this frequency that Max Spot Age has not aged out, through the
+// table's own rule (lib/spot-age.js). allSpots also holds spots past the
+// limit, and the VFO card used to name them: a 3-hour-old spot came back on
+// the card whenever the dial crossed its frequency (#502).
+function liveSpotAtFreq(khz) {
+  if (!(khz > 0)) return null;
+  const ageOpts = { maxAgeMin, sotaMaxAgeMin, dxcMaxAgeMin, potaAgeLimit };
+  const nowMs = Date.now();
+  return allSpots.find(s => Math.abs(parseFloat(s.frequency) - khz) < 0.5 &&
+    SpotAge.spotWithinAge(s, ageOpts, nowMs)) || null;
+}
+
+// When the spot list refreshes, a card spot that has aged out leaves the VFO
+// card (a live spot at the same frequency takes its place). The operator's own
+// pick (lastTunedSpot) stays, as the table keeps it pinned (#502).
+function refreshVfoCardAge() {
+  if (!vfoCardSpot || vfoCardSpot === lastTunedSpot) return;
+  const ageOpts = { maxAgeMin, sotaMaxAgeMin, dxcMaxAgeMin, potaAgeLimit };
+  if (SpotAge.spotWithinAge(vfoCardSpot, ageOpts, Date.now())) return;
+  notifyVfoTunedSpot(liveSpotAtFreq(parseFloat(vfoCardSpot.frequency)));
+}
+
 /** Send tuned spot info to VFO popout */
 function notifyVfoTunedSpot(spot) {
   vfoCardSpot = spot || null;
@@ -714,6 +736,9 @@ let radioFreqKhzExact = null;
 let radioMode = null;
 
 let scanning = false;
+// The key chosen under Settings > ECHOCAT > "Hold a key to talk" (a KeyboardEvent.code,
+// '' = off). That key belongs to PTT alone: the Space-starts-scan shortcut steps aside.
+let remoteShackPttKey = '';
 let remoteScanning = false; // ECHOCAT mobile's scan engine is running (scan-state-sync-desktop)
 let scanTimer = null;
 let scanIndex = 0;
@@ -1296,6 +1321,7 @@ const lotwUploadBtn = document.getElementById('lotw-upload-btn');
 const lotwUploadResult = document.getElementById('lotw-upload-result');
 const setLotwAutoDownload = document.getElementById('set-lotw-auto-download');
 const setLotwLogin = document.getElementById('set-lotw-login');
+const setLotwTqslPath = document.getElementById('set-lotw-tqsl-path');
 const setLotwWebPassword = document.getElementById('set-lotw-web-password');
 const lotwDownloadBtn = document.getElementById('lotw-download-btn');
 const lotwDownloadResult = document.getElementById('lotw-download-result');
@@ -1553,7 +1579,6 @@ const setTxEqPreset = document.getElementById('set-tx-eq-preset');
 const setTxEqPresetRow = document.getElementById('set-tx-eq-preset-row');
 const setCwKeyPort = document.getElementById('set-cw-key-port');
 const setCwKeyLine = document.getElementById('set-cw-key-line');
-const remoteUrlDisplay = document.getElementById('remote-url-display');
 // Mobile-app pairing UI (Phase 0 of native app)
 const echocatPairBtn = document.getElementById('echocat-pair-btn');
 const echocatPairedList = document.getElementById('echocat-paired-list');
@@ -1806,7 +1831,8 @@ function renderRemotePowerRow(info) {
   row.appendChild(label);
   // #485: an off-only radio (the FTX-1) gets no Power On.
   if (info.canPowerOn !== false) row.appendChild(on);
-  row.appendChild(off);
+  // #293: no Power Off where the shack could not switch the radio back on.
+  if (info.canPowerOff !== false) row.appendChild(off);
   return row;
 }
 
@@ -2506,7 +2532,7 @@ function getEffectiveSerialcatPort() {
 // the same trap that broke K3SBP's Flex TX (see syncRigAudioDeviceBypass).
 const AUDIO_SOURCE_HELP = {
   flex: 'Flex Direct streams receive and transmit audio straight to the radio (VITA-49) — no DAX program and no audio device setup. Pick Local audio device only if you deliberately run the DAX program.',
-  'yaesu-lan': "Yaesu LAN audio decodes the radio's receive audio over the SCU-LAN10 for JTCAT and SSTV. It is receive only for now: POTACAT will not key the radio with this source, because the carrier would be silent. To transmit from POTACAT, pick the local audio device (the radio's USB sound card on this computer).",
+  'yaesu-lan': "Yaesu LAN audio carries the radio's receive audio over the SCU-LAN10 for listening, JTCAT and SSTV, and transmit audio back to the radio: voice from the VFO window's PTT or ECHOCAT, voice macros, JTCAT (FT8/FT4), Tune and SSTV (the radio's menu setting is under Setup instructions in the rig editor). Winlink cannot transmit with this source yet: POTACAT refuses it rather than send a silent carrier. For Winlink, pick the local audio device (the radio's USB sound card on this computer).",
   'icom-network': "Icom Network audio uses the radio's RS-BA1 UDP stream for JTCAT/SSTV receive audio and sends JTCAT FT8/FT4 plus SSTV transmit audio directly over the network — no soundcard needed.",
 };
 function rebuildAudioSourceOptions() {
@@ -2721,6 +2747,8 @@ async function populateRadioSection(currentTarget) {
     document.getElementById('set-yaesu-lan-port').value = currentTarget.port || 50000;
     document.getElementById('set-yaesu-lan-username').value = currentTarget.username || '';
     document.getElementById('set-yaesu-lan-password').value = currentTarget.password || '';
+    document.getElementById('set-yaesu-lan-mute-monitor').checked = !!currentTarget.muteMonitor;
+    syncYaesuLanMuteMonitorRow();
   } else if (currentTarget.type === 'rigctld') {
     setRadioType('hamlib');
     hamlibFieldsLoaded = true;
@@ -2885,6 +2913,43 @@ async function loadSerialcatPorts(savedTarget) {
   const pttSel = document.getElementById('set-serialcat-ptt');
   if (pttSel) pttSel.value = savedPttChoice(savedTarget);
   serialcatPortsLoaded = true;
+  updateSerialcatPttConflict();
+}
+
+// PTT on RTS with RTS/CTS flow control (or RTS held high) on the same port
+// can never key the radio (#544, W5PLC FTDX10). Said here while it is being
+// chosen, with the two fixes as buttons; nothing changes until one is pressed.
+function serialcatModelHandshake() {
+  const name = rigModelSelect ? rigModelSelect.value : '';
+  if (!name) return undefined;
+  return rigModelData.some((g) => Array.isArray(g.rtsCts) && g.rtsCts.includes(name)) ? 'hardware' : undefined;
+}
+function updateSerialcatPttConflict() {
+  const box = document.getElementById('serialcat-ptt-conflict');
+  if (!box || typeof PttFlowConflict === 'undefined') return;
+  const target = {
+    type: 'serial',
+    path: getEffectiveSerialcatPort(),
+    serialHandshake: (document.getElementById('set-serialcat-handshake') || {}).value || 'auto',
+    ...pttChoiceField('set-serialcat-ptt'),
+  };
+  const c = PttFlowConflict.pttFlowConflict(target, serialcatModelHandshake());
+  box.classList.toggle('hidden', !c);
+  const text = document.getElementById('serialcat-ptt-conflict-text');
+  if (text) text.textContent = c ? c.message + (c.source === 'model' ? ' (RTS line: Auto uses RTS/CTS flow control for this radio.)' : '') : '';
+}
+for (const id of ['set-serialcat-handshake', 'set-serialcat-ptt']) {
+  const el = document.getElementById(id);
+  if (el) el.addEventListener('change', updateSerialcatPttConflict);
+}
+if (rigModelSelect) rigModelSelect.addEventListener('change', updateSerialcatPttConflict);
+for (const btn of document.querySelectorAll('#serialcat-ptt-conflict [data-ptt-fix]')) {
+  btn.addEventListener('click', () => {
+    const fix = btn.getAttribute('data-ptt-fix');
+    if (fix === 'rts-held-low') { const hs = document.getElementById('set-serialcat-handshake'); if (hs) hs.value = 'none'; }
+    if (fix === 'ptt-over-cat') { const ptt = document.getElementById('set-serialcat-ptt'); if (ptt) ptt.value = 'cat'; }
+    updateSerialcatPttConflict();
+  });
 }
 
 // --- Rig profile management ---
@@ -3366,7 +3431,7 @@ function renderRigList(rigs, activeRigId, tciTestLink) {
   const noneItem = document.createElement('div');
   noneItem.className = 'rig-item' + (!activeRigId ? ' active' : '');
   noneItem.innerHTML = `
-    <input type="radio" name="active-rig" value="" ${!activeRigId ? 'checked' : ''}>
+    <input type="radio" name="active-rig" value="" aria-label="No radio connected" ${!activeRigId ? 'checked' : ''}>
     <div class="rig-item-info">
       <div class="rig-item-name">None</div>
       <div class="rig-item-desc">No radio connected</div>
@@ -3390,6 +3455,10 @@ function renderRigList(rigs, activeRigId, tciTestLink) {
     radio.name = 'active-rig';
     radio.value = rig.id;
     if (isActive) radio.checked = true;
+    // #603: VoiceOver and other screen readers read a bare radio as "radio
+    // button" with no name. Every control in the row says which rig it acts on.
+    const rigLabel = rig.name || 'Unnamed Rig';
+    radio.setAttribute('aria-label', 'Use ' + rigLabel);
 
     const info = document.createElement('div');
     info.className = 'rig-item-info';
@@ -3411,6 +3480,7 @@ function renderRigList(rigs, activeRigId, tciTestLink) {
     editBtn.className = 'rig-item-btn';
     editBtn.textContent = 'Edit';
     editBtn.title = 'Edit this rig';
+    editBtn.setAttribute('aria-label', 'Edit ' + rigLabel);
     editBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       openRigEditor('edit', rig.id);
@@ -3421,6 +3491,7 @@ function renderRigList(rigs, activeRigId, tciTestLink) {
     deleteBtn.className = 'rig-item-btn rig-delete-btn';
     deleteBtn.textContent = '\u2715';
     deleteBtn.title = 'Delete this rig';
+    deleteBtn.setAttribute('aria-label', 'Delete ' + rigLabel);
     deleteBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       deleteRig(rig.id);
@@ -3614,6 +3685,9 @@ function fillSdrScopeForm(cfg) {
   el('set-sdr-scope-direct').value = c.directSampling || 'off';
   el('set-sdr-scope-ppm').value = c.ppm || 0;
   el('set-sdr-scope-offset').value = c.offsetHz || 0;
+  if (el('set-sdr-scope-tap')) el('set-sdr-scope-tap').value = c.tapMode === 'fixedIf' ? 'fixedIf' : 'follow';
+  if (el('set-sdr-scope-if')) el('set-sdr-scope-if').value = c.ifHz || 0;
+  if (el('set-sdr-scope-invert')) el('set-sdr-scope-invert').checked = c.invertIf === true;
   el('set-sdr-scope-prefer').checked = c.preferSdr === true;
   syncSdrScopeForm();
 }
@@ -3624,6 +3698,13 @@ function syncSdrScopeForm() {
   const prefer = document.getElementById('sdr-scope-prefer-wrap');
   const model = rigModelSelect ? rigModelSelect.value : '';
   if (prefer) prefer.style.display = /FT-?710/i.test(model || '') ? '' : 'none';
+  // #394: a fixed IF tap takes an IF frequency; an antenna or RX OUT takes the offset.
+  const tap = document.getElementById('set-sdr-scope-tap');
+  const fixedIf = !!(tap && tap.value === 'fixedIf');
+  const show = (id, on) => { const w = document.getElementById(id); if (w) w.style.display = on ? '' : 'none'; };
+  show('sdr-scope-offset-wrap', !fixedIf);
+  show('sdr-scope-if-wrap', fixedIf);
+  show('sdr-scope-invert-wrap', fixedIf);
 }
 function readSdrScopeForm() {
   const el = (id) => document.getElementById(id);
@@ -3639,12 +3720,17 @@ function readSdrScopeForm() {
     directSampling: el('set-sdr-scope-direct').value || 'off',
     ppm: parseInt(el('set-sdr-scope-ppm').value, 10) || 0,
     offsetHz: parseInt(el('set-sdr-scope-offset').value, 10) || 0,
+    tapMode: el('set-sdr-scope-tap') && el('set-sdr-scope-tap').value === 'fixedIf' ? 'fixedIf' : 'follow',
+    ifHz: el('set-sdr-scope-if') ? Math.max(0, parseInt(el('set-sdr-scope-if').value, 10) || 0) : 0,
+    invertIf: !!(el('set-sdr-scope-invert') && el('set-sdr-scope-invert').checked),
     preferSdr: el('set-sdr-scope-prefer').checked,
   };
 }
 {
   const en = document.getElementById('set-sdr-scope-enabled');
   if (en) en.addEventListener('change', syncSdrScopeForm);
+  const tap = document.getElementById('set-sdr-scope-tap');
+  if (tap) tap.addEventListener('change', syncSdrScopeForm);
   if (rigModelSelect) rigModelSelect.addEventListener('change', syncSdrScopeForm);
 }
 
@@ -3723,6 +3809,31 @@ function rigBandsToSave() {
   return list.length ? list : undefined;
 }
 if (rigModelSelect) rigModelSelect.addEventListener('change', () => { loadRigBandsForModel(); });
+// The SCU-LAN10 monitor mute is offered where an owner confirmed the radio's
+// monitor (ML) is set per mode: FT-710 and FTDX10 (lib/sculan10-protocol.js
+// MONITOR_PER_MODE_MODELS). The FTDX101 waits for an owner.
+function syncYaesuLanMuteMonitorRow() {
+  const row = document.getElementById('yaesu-lan-mute-monitor-row');
+  if (!row) return;
+  const ok = !!rigModelSelect && ['FT-710', 'FTDX10'].includes(rigModelSelect.value);
+  row.style.display = ok ? '' : 'none';
+  if (!ok) { const cb = document.getElementById('set-yaesu-lan-mute-monitor'); if (cb) cb.checked = false; }
+}
+if (rigModelSelect) rigModelSelect.addEventListener('change', syncYaesuLanMuteMonitorRow);
+// Transmit audio input (#594): the Kenwoods whose key-down picks the socket
+// (lib/tx-audio-input.js). The TS-480 has no default: blank = ask on the
+// first transmit; the others are blank = Rear, as before.
+function syncTxAudioInputRow() {
+  const row = document.getElementById('rig-tx-audio-input');
+  const sel = document.getElementById('set-tx-audio-input');
+  if (!row || !sel || !window.TxAudioInput) return;
+  const model = rigModelSelect ? rigModelSelect.value : '';
+  const ok = window.TxAudioInput.hasChoice(model);
+  row.classList.toggle('hidden', !ok);
+  const blank = sel.querySelector('option[value=""]');
+  if (blank) blank.textContent = ok && window.TxAudioInput.MODELS[model] == null ? 'Ask on first transmit' : 'Rear (data / ACC2 socket), the default';
+}
+if (rigModelSelect) rigModelSelect.addEventListener('change', syncTxAudioInputRow);
 {
   const reset = document.getElementById('rig-bands-reset');
   if (reset) reset.addEventListener('click', () => { rigBandsState.touched = false; loadRigBandsForModel(); });
@@ -3745,7 +3856,8 @@ async function openRigEditor(mode, rigId) {
       setRigName.value = rig.name || '';
       const catLabelEl = document.getElementById('set-rig-cat-label');
       if (catLabelEl) catLabelEl.value = rig.catLabel || '';
-      if (rigModelSelect) rigModelSelect.value = rig.model || '';
+      if (rigModelSelect) { rigModelSelect.value = rig.model || ''; syncYaesuLanMuteMonitorRow(); }
+      { const t = document.getElementById('set-tx-audio-input'); if (t) t.value = rig.txAudioInput === 'front' || rig.txAudioInput === 'rear' ? rig.txAudioInput : ''; syncTxAudioInputRow(); }
       await populateRadioSection(rig.catTarget);
       // Per-rig audio source — populateRadioSection just rebuilt the options
       // for this rig's radio type, so the stored value (validated) sticks.
@@ -3777,6 +3889,15 @@ async function openRigEditor(mode, rigId) {
       if (atuKeepOnEl) atuKeepOnEl.checked = !!rig.atuKeepOn;
       const voiceAsDataEl = document.getElementById('set-voice-as-data');
       if (voiceAsDataEl) voiceAsDataEl.checked = !!rig.voiceAsData;
+      const allowPowerOffEl = document.getElementById('set-allow-power-off');
+      if (allowPowerOffEl) allowPowerOffEl.checked = !!rig.allowPowerOffNoWake;
+      { // the amplifier drive limit (lib/amp-drive-limit.js)
+        const on = document.getElementById('set-amp-drive-on');
+        const w = document.getElementById('set-amp-drive-w');
+        const lim = Number(rig.ampDriveLimitW) > 0 ? Number(rig.ampDriveLimitW) : 0;
+        if (on) on.checked = lim > 0;
+        if (w) w.value = lim > 0 ? lim : 10;
+      }
       const lanVoiceSsbEl = document.getElementById('set-lan-voice-ssb');
       if (lanVoiceSsbEl) lanVoiceSsbEl.checked = !!rig.lanVoiceInSsb;
       const packetModeEl = document.getElementById('set-packet-mode');
@@ -3790,7 +3911,8 @@ async function openRigEditor(mode, rigId) {
     rigEditorTitle.textContent = 'Add Rig';
     setRigName.value = '';
     { const catLabelEl = document.getElementById('set-rig-cat-label'); if (catLabelEl) catLabelEl.value = ''; }
-    if (rigModelSelect) rigModelSelect.value = '';
+    if (rigModelSelect) { rigModelSelect.value = ''; syncYaesuLanMuteMonitorRow(); }
+    { const t = document.getElementById('set-tx-audio-input'); if (t) t.value = ''; syncTxAudioInputRow(); }
     if (setCwKeyLine) setCwKeyLine.value = 'auto';
     if (setRadioNr) setRadioNr.value = '1';
     setRigFullPowerField(null);
@@ -3802,6 +3924,9 @@ async function openRigEditor(mode, rigId) {
     buildFlexBandAntennaMap({});
     fillSdrScopeForm(null);
     { const v = document.getElementById('set-voice-as-data'); if (v) v.checked = false; }
+    { const v = document.getElementById('set-allow-power-off'); if (v) v.checked = false; }
+    { const v = document.getElementById('set-amp-drive-on'); if (v) v.checked = false; }
+    { const v = document.getElementById('set-amp-drive-w'); if (v) v.value = 10; }
     { const v = document.getElementById('set-packet-mode'); if (v) v.value = 'auto'; }
     await populateRigAudioDevices('', '');
   }
@@ -3941,6 +4066,20 @@ async function saveRigEditor() {
   const rigAtuKeepOn = !!(atuKeepOnEl && atuKeepOnEl.checked);
   const voiceAsDataEl = document.getElementById('set-voice-as-data');
   const rigVoiceAsData = !!(voiceAsDataEl && voiceAsDataEl.checked);
+  const allowPowerOffEl = document.getElementById('set-allow-power-off');
+  const rigAllowPowerOff = !!(allowPowerOffEl && allowPowerOffEl.checked); // #293
+  const ampDriveOnEl = document.getElementById('set-amp-drive-on');
+  const ampDriveWEl = document.getElementById('set-amp-drive-w');
+  // The amplifier drive limit: ticked and a positive number, else none. Same
+  // rule as lib/amp-drive-limit.js parseField (0.1 W steps, at most 2000 W).
+  const rigAmpDriveW = (() => {
+    if (!(ampDriveOnEl && ampDriveOnEl.checked)) return 0;
+    const n = parseFloat(ampDriveWEl ? ampDriveWEl.value : '');
+    return Number.isFinite(n) && n > 0 ? Math.min(2000, Math.round(n * 10) / 10) : 0;
+  })();
+  const txAudioInputEl = document.getElementById('set-tx-audio-input');
+  const rigTxAudioInput = txAudioInputEl && (txAudioInputEl.value === 'front' || txAudioInputEl.value === 'rear')
+    && window.TxAudioInput && window.TxAudioInput.hasChoice(model) ? txAudioInputEl.value : ''; // #594
   const lanVoiceSsbEl = document.getElementById('set-lan-voice-ssb');
   const rigLanVoiceInSsb = !!(lanVoiceSsbEl && lanVoiceSsbEl.checked);
   const packetModeEl = document.getElementById('set-packet-mode');
@@ -3973,6 +4112,9 @@ async function saveRigEditor() {
       rig.externalAtuSeconds = rigExternalAtuSeconds;
       rig.atuKeepOn = rigAtuKeepOn;
       if (rigVoiceAsData) rig.voiceAsData = true; else delete rig.voiceAsData;
+      if (rigAllowPowerOff) rig.allowPowerOffNoWake = true; else delete rig.allowPowerOffNoWake;
+      if (rigAmpDriveW > 0) rig.ampDriveLimitW = rigAmpDriveW; else delete rig.ampDriveLimitW;
+      if (rigTxAudioInput) rig.txAudioInput = rigTxAudioInput; else delete rig.txAudioInput;
       if (rigLanVoiceInSsb) rig.lanVoiceInSsb = true; else delete rig.lanVoiceInSsb;
       if (rigPacketMode) rig.packetMode = rigPacketMode; else delete rig.packetMode; // absent = Automatic
       rig.flexBandAntennaMap = flexBandAntennaMap;
@@ -4003,6 +4145,9 @@ async function saveRigEditor() {
       externalAtuSeconds: rigExternalAtuSeconds,
       atuKeepOn: rigAtuKeepOn,
       ...(rigVoiceAsData ? { voiceAsData: true } : {}),
+      ...(rigAllowPowerOff ? { allowPowerOffNoWake: true } : {}),
+      ...(rigAmpDriveW > 0 ? { ampDriveLimitW: rigAmpDriveW } : {}),
+      ...(rigTxAudioInput ? { txAudioInput: rigTxAudioInput } : {}),
       ...(rigLanVoiceInSsb ? { lanVoiceInSsb: true } : {}),
       ...(rigPacketMode ? { packetMode: rigPacketMode } : {}),
       flexBandAntennaMap,
@@ -4113,8 +4258,10 @@ function initMultiDropdown(container, label, onChange) {
       if (radioCb) radioCb.checked = false;
       // If nothing checked, check "All"
       if (itemCbs.every((c) => !c.checked)) allCb.checked = true;
-      // If everything checked, switch to "All"
-      if (itemCbs.every((c) => c.checked)) {
+      // If everything this radio offers is checked, switch to "All" (a band
+      // the radio is not used on is hidden, lib/rig-bands.js, and stays unticked).
+      const shown = itemCbs.filter((c) => { const it = c.closest('.multi-dropdown-item'); return !(it && it.hidden); });
+      if (shown.length && shown.every((c) => c.checked)) {
         allCb.checked = true;
         itemCbs.forEach((c) => { c.checked = false; });
       }
@@ -4145,7 +4292,7 @@ function getDropdownValues(container) {
   return new Set(checked.map((cb) => cb.value));
 }
 
-initMultiDropdown(bandFilterEl, 'Band', () => { updateBandButtonsVisibility(); render(); });
+initMultiDropdown(bandFilterEl, 'Band', () => { noteBandFilterTicks(); updateBandButtonsVisibility(); render(); });
 initMultiDropdown(modeFilterEl, 'Mode');
 // Continent filter is now inline in Spots panel — wire "All" toggle manually
 if (continentFilterEl) {
@@ -4973,6 +5120,44 @@ function playTuneClick() {
 // --- Persist filters to localStorage ---
 const FILTERS_KEY = 'pota-cat-filters';
 
+// The Spots band filter follows the radio (#291, lib/spot-band-filter.js):
+// what is kept is the bands the operator turned OFF, one list for every rig,
+// and a rig shows its own bands minus that list. var, not let: the rig-bands
+// receivers near the end of this file may run first.
+var bandFilterOff = [];
+var bandFilterLegacyTicks = null; // a saved ticked list from before #291, read once the rig's bands are known
+var rigBandsKnown = false;
+
+/** The operator changed the band filter: remember what is now off on this radio. */
+function noteBandFilterTicks() {
+  const SBF = window.SpotBandFilter;
+  if (!SBF) return;
+  const radioCb = bandFilterEl.querySelector('input[value="radio"]');
+  if (radioCb && radioCb.checked) return; // Radio follows the dial, not a list
+  const ticks = getDropdownValues(bandFilterEl);
+  bandFilterOff = SBF.offFromTicks(ticks ? [...ticks] : null, rigBandsList, bandFilterLegacyTicks ? [] : bandFilterOff);
+  bandFilterLegacyTicks = null;
+}
+
+/** Tick the band filter for the active radio: its bands minus the off list, or All. */
+function syncBandFilterToRig() {
+  const SBF = window.SpotBandFilter;
+  if (!SBF || !bandFilterEl) return false;
+  const radioCb = bandFilterEl.querySelector('input[value="radio"]');
+  if (radioCb && radioCb.checked) return false;
+  if (bandFilterLegacyTicks) {
+    if (!rigBandsKnown) return false;
+    bandFilterOff = SBF.offFromTicks(bandFilterLegacyTicks, rigBandsList, []);
+    bandFilterLegacyTicks = null;
+  }
+  const ticks = SBF.ticksForRig(bandFilterOff, rigBandsList);
+  const set = new Set(ticks || []);
+  bandFilterEl.querySelector('input[value="all"]').checked = !ticks;
+  bandFilterEl.querySelectorAll('input:not([value="all"]):not([value="radio"])').forEach((cb) => { cb.checked = !!ticks && set.has(cb.value); });
+  if (bandFilterEl._updateText) bandFilterEl._updateText();
+  return true;
+}
+
 function saveFilters() {
   const bandRadioCb = bandFilterEl.querySelector('input[value="radio"]');
   const bandRadio = bandRadioCb && bandRadioCb.checked;
@@ -4982,7 +5167,10 @@ function saveFilters() {
   const modes = modeRadio ? null : getDropdownValues(modeFilterEl);
   const continents = getDropdownValues(continentFilterEl);
   const data = {
-    bands: bands ? [...bands] : null,
+    // bands: the ticks as they stand (what versions before #291 read back);
+    // bandsOff: what this version reads (lib/spot-band-filter.js).
+    bands: bandFilterLegacyTicks || (bands ? [...bands] : null),
+    ...(bandFilterLegacyTicks ? {} : { bandsOff: bandFilterOff.slice() }),
     bandRadio,
     modes: modes ? [...modes] : null,
     modeRadio,
@@ -5006,7 +5194,14 @@ function restoreFilters() {
       return;
     }
 
-    // Restore band checkboxes
+    // Restore band checkboxes. The off list is what counts (#291); an older
+    // ticked list waits for the rig's bands (syncBandFilterToRig).
+    if (Array.isArray(data.bandsOff) && window.SpotBandFilter) {
+      bandFilterOff = window.SpotBandFilter.offFromSaved(data, null);
+      bandFilterLegacyTicks = null;
+    } else if (Array.isArray(data.bands)) {
+      bandFilterLegacyTicks = data.bands.slice();
+    }
     if (data.bandRadio) {
       bandFilterEl.querySelector('input[value="all"]').checked = false;
       const radioCb = bandFilterEl.querySelector('input[value="radio"]');
@@ -5125,7 +5320,9 @@ function showQrzLoginStatus(result) {
   if (result.error) {
     qrzSubStatus.textContent = result.text || result.error;
     qrzSubStatus.style.color = '#e94560';
-    setQrzLogbook.disabled = true;
+    // A check that failed never turns uploads off: a box already ticked stays
+    // ticked (and can be unticked); only a new tick waits for a good check.
+    setQrzLogbook.disabled = !setQrzLogbook.checked;
   } else if (result.subscriber) {
     qrzSubStatus.textContent = result.text || `XML Subscriber \u2014 expires ${result.expiry}`;
     qrzSubStatus.style.color = '#4ecca3';
@@ -5135,9 +5332,14 @@ function showQrzLoginStatus(result) {
       ? `QRZ XML subscription expired (${result.expiry})`
       : 'No active QRZ XML subscription');
     qrzSubStatus.style.color = '#f0a500';
-    setQrzLogbook.disabled = true;
-    setQrzLogbook.checked = false;
-    qrzLogbookConfig.classList.add('hidden');
+    // Never untick a saved upload here: a check that briefly missed the
+    // subscription used to untick it, the next Save stored it off, and
+    // contacts silently stopped reaching QRZ. If QRZ refuses an upload, the
+    // log toast says so after that contact.
+    setQrzLogbook.disabled = !setQrzLogbook.checked;
+    if (setQrzLogbook.checked) {
+      qrzSubStatus.textContent += ' Uploads stay on; if QRZ refuses one, POTACAT tells you after that contact.';
+    }
   }
 }
 
@@ -6225,8 +6427,12 @@ setSotaUpload.addEventListener('change', () => {
 async function refreshLotwLocations(preferred) {
   if (!window.api || !window.api.lotwLocations) return;
   try {
-    const r = await window.api.lotwLocations();
+    const r = await window.api.lotwLocations({ tqslPath: setLotwTqslPath.value.trim() });
     document.getElementById('lotw-missing').classList.toggle('hidden', !!r.tqslPath);
+    const found = document.getElementById('lotw-tqsl-found');
+    if (found) found.textContent = r.tqslPath
+      ? 'Using ' + r.tqslPath
+      : 'Leave blank and POTACAT looks in the usual places, including a Flatpak install on Linux.';
     const want = preferred || setLotwLocation.value || r.configured || '';
     setLotwLocation.innerHTML = '<option value="">Select...</option>';
     for (const name of r.locations || []) {
@@ -6244,6 +6450,18 @@ setLotwEnable.addEventListener('change', () => {
   lotwConfig.classList.toggle('hidden', !setLotwEnable.checked);
   if (setLotwEnable.checked) refreshLotwLocations();
 });
+// The TQSL program (#343): typed or picked, checked at once so "Using ..."
+// and the not-found note follow the field before Save.
+setLotwTqslPath.addEventListener('change', () => refreshLotwLocations());
+document.getElementById('lotw-tqsl-browse').addEventListener('click', async () => {
+  if (!window.api || !window.api.echocatPickFile) return;
+  const isWin = navigator.platform.startsWith('Win');
+  const p = await window.api.echocatPickFile({
+    title: 'Select the TQSL program',
+    filters: isWin ? [{ name: 'Programs', extensions: ['exe'] }, { name: 'All files', extensions: ['*'] }] : [{ name: 'All files', extensions: ['*'] }],
+  });
+  if (p) { setLotwTqslPath.value = p; refreshLotwLocations(); }
+});
 lotwUploadBtn.addEventListener('click', async () => {
   if (!window.api || !window.api.lotwUpload) return;
   lotwUploadBtn.disabled = true;
@@ -6253,6 +6471,7 @@ lotwUploadBtn.addEventListener('click', async () => {
     const r = await window.api.lotwUpload({
       location: setLotwLocation.value,
       password: setLotwPassword.value,
+      tqslPath: setLotwTqslPath.value.trim(),
     });
     // On failure include TQSL's own last words (stderr tail) — "unexpected
     // code" alone gave LZ3AW nothing to act on.
@@ -7262,12 +7481,12 @@ async function echocatRefreshTailscaleStatus() {
   if (!s.certCached && s.platform === 'linux') {
     echocatTsStatus.innerHTML =
       `Tailscale: <code>${_esc(s.hostname || '')}</code>. On Linux, Tailscale gives certificates only to its operator. ` +
-      `Run once in a terminal: <code>sudo tailscale set --operator=$USER</code>, restart POTACAT, then open the pairing QR.`;
+      `Run once in a terminal: <code>sudo tailscale set --operator=$USER</code>, restart POTACAT, then click <b>Pair my device&hellip;</b> on the ECHOCAT card in Settings &gt; Summary.`;
     return;
   }
   if (!s.certCached) {
     echocatTsStatus.innerHTML =
-      `Tailscale: <code>${s.hostname}</code>. Tap "Open pairing QR" to issue a TLS cert. ` +
+      `Tailscale: <code>${s.hostname}</code>. Click <b>Pair my device&hellip;</b> on the ECHOCAT card in Settings &gt; Summary to issue a TLS cert. ` +
       `If issuance fails, enable HTTPS Certificates at <a href="https://login.tailscale.com/admin/dns" target="_blank" style="color:#4fc3f7;">admin → DNS</a>.`;
     return;
   }
@@ -7543,7 +7762,7 @@ async function _summaryTunnelDiagRefresh() {
     const dim = (s) => '<span style="color:var(--text-tertiary);">' + s + '</span>';
     const lines = [];
     if (d.user && d.user.callsign) {
-      lines.push('<div><strong>User:</strong> ' + _esc(d.user.callsign) + ' (id ' + _esc(d.user.id) + ')</div>');
+      lines.push('<div><strong>User:</strong> ' + _esc(d.user.callsign) + (d.user.id ? ' (id ' + _esc(d.user.id) + ')' : '') + '</div>');
     }
     if (d.db) {
       lines.push('<div><strong>DB row:</strong> tunnelId=' + (d.db.cloudTunnelId ? _esc(d.db.cloudTunnelId.slice(0, 8) + '…') : dim('null')) + ' host=' + (d.db.cloudHost ? _esc(d.db.cloudHost) : dim('null')) + ' sub=' + _esc(d.db.subscriptionStatus || 'none') + '</div>');
@@ -7816,7 +8035,7 @@ async function _shareRigIssue() {
       const errMap = {
         // The 403 body carries the server's own sentence (why access is
         // off, and where it is fixed) — prefer it over the generic line.
-        subscription_required: (res && res.billing && res.billing.message) || 'Sharing your rig needs an active POTACAT Cloud subscription. Subscribe from Settings › Cloud.',
+        subscription_required: (res && res.billing && res.billing.message) || (res && res.message && res.message !== res.error ? res.message : '') || 'Sharing your rig needs an active POTACAT Cloud subscription. Subscribe from Settings › Cloud.',
         unauthorized: 'Sign in to POTACAT Cloud first.',
       };
       status.textContent = errMap[res && res.error] || ('Error: ' + (res && res.error ? res.error : 'unknown'));
@@ -8414,6 +8633,11 @@ async function _remoteRadiosRefreshList() {
         return '<button type="button" class="primary" data-act="rr-pass-claim" data-id="' + _esc(t.id) + '">Use it here instead</button>'
           + '<button type="button" data-act="rr-disconnect" data-id="' + _esc(t.id) + '">Disconnect</button>';
       }
+      // The owner has not used the radio for 5 minutes: take it back (#200 step 4).
+      if (isActive && status.state === 'connected' && passStateShown && passStateWords.action === 'Take the radio') {
+        return '<button type="button" class="primary" data-act="rr-pass-take-back" data-id="' + _esc(t.id) + '">Take the radio</button>'
+          + '<button type="button" data-act="rr-disconnect" data-id="' + _esc(t.id) + '">Disconnect</button>';
+      }
       if (isActive && status.state === 'connected') {
         return '<button type="button" class="primary" data-act="rr-disconnect" data-id="' + _esc(t.id) + '">Disconnect</button>';
       }
@@ -8584,6 +8808,7 @@ async function _remoteRadiosRemove(id) {
     const id = btn.dataset.id;
     if (act === 'rr-connect') return _remoteRadiosConnect(id);
     if (act === 'rr-pass-claim') return _remotePassClaim();
+    if (act === 'rr-pass-take-back') return _remotePassTakeBack();
     if (act === 'rr-disconnect') return _remoteRadiosDisconnect();
     if (act === 'rr-rename') return _remoteRadiosRename(id, btn.dataset.name || '');
     if (act === 'rr-remove') return _remoteRadiosRemove(id);
@@ -8726,16 +8951,26 @@ async function _remotePassClaim() {
     if (r && r.error && typeof showLogToast === 'function') showLogToast(r.error, { warn: true, duration: 6000 });
   } catch (err) { if (typeof showLogToast === 'function') showLogToast('Could not take the radio: ' + (err.message || err), { warn: true, duration: 6000 }); }
 }
+// "Take the radio": the owner has not used it for 5 minutes (waiting /
+// owner-idle, #200 step 4). The station answers with pass-state.
+async function _remotePassTakeBack() {
+  try {
+    const r = window.api.remotePassTakeBack ? await window.api.remotePassTakeBack() : null;
+    if (r && r.error && typeof showLogToast === 'function') showLogToast(r.error, { warn: true, duration: 6000 });
+  } catch (err) { if (typeof showLogToast === 'function') showLogToast('Could not take the radio: ' + (err.message || err), { warn: true, duration: 6000 }); }
+}
 // The Guest Pass state the station last sent (#541 step 2), for the chip.
 let _remotePassState = null;
 // A pass-state in words: the banner, with its one button where this PC can
-// act on it ("Use it here instead" claims; "Try now" asks the station again).
+// act on it ("Use it here instead" claims; "Take the radio" takes it back
+// after the owner's idle minutes; "Try now" asks the station again).
 function _passStateBanner(ps) {
   if (!ps || !window.PassWording || !PassWording.describeState) return;
   if (ps.state === 'on-air' && ps.reason === 'none') { _passBannerHide(); return; }
   const w = PassWording.describeState(ps, { owner: ps.owner });
   if (!w.title) return;
   if (w.action === 'Use it here instead') { _passBannerShow(w, null, _remotePassClaim); return; }
+  if (w.action === 'Take the radio') { _passBannerShow(w, null, _remotePassTakeBack); return; }
   if (w.action === 'Try now') { _passBannerShow(w, ps.targetId || null); return; }
   _passBannerShow({ ...w, action: '' }, null);
 }
@@ -9007,6 +9242,7 @@ if (window.api && window.api.onRemoteClientDisplaced) {
       });
       document.addEventListener('keyup', (e) => {
         if (!_pttKeyHeld || e.code !== _pttKey) return;
+        e.preventDefault(); // a focused button must not click on the release
         _pttKeyHeld = false;
         ptt.up();
       });
@@ -9034,6 +9270,7 @@ if (window.api && window.api.onRemoteClientDisplaced) {
     const applyAudioPrefs = (p) => {
       if (!p) return;
       _pttKey = p.pttKey || '';
+      remoteShackPttKey = _pttKey;
       if (volEl && document.activeElement !== volEl) volEl.value = String(Math.round((p.volume == null ? 1 : p.volume) * 100));
       if (muteEl) { muteEl.textContent = p.muted ? '🔇' : '🔊'; muteEl.title = p.muted ? 'Unmute the shack audio' : 'Mute the shack audio'; }
       showAudioElsewhere(_lastShackInfo);
@@ -10039,7 +10276,7 @@ function _wireSummaryCardActionsOnce() {
         const r = await window.api.cloudTunnelEnable();
         if (r && r.error) {
           const map = {
-            'entitlement-required': (r.billing && r.billing.message) || 'POTACAT Cloud Tunnel needs an active POTACAT Cloud subscription. Subscribe from the Cloud card to turn it on.',
+            'entitlement-required': (r.billing && r.billing.message) || r.message || 'POTACAT Cloud Tunnel needs an active POTACAT Cloud subscription. Subscribe from the Cloud card to turn it on.',
             'cloudflared-missing': 'POTACAT can\'t find the cloudflared helper. Reinstall POTACAT (the installer bundles it).',
             'auth-required': 'You need to sign in to POTACAT Cloud first. Use the Cloud card above to sign in.',
           };
@@ -10424,54 +10661,6 @@ if (remoteAudioEditLink) {
     e.preventDefault();
     switchSettingsTab('radio');
   });
-}
-
-async function populateRemoteURLs() {
-  try {
-    const ips = await window.api.getLocalIPs();
-    const port = setRemotePort.value || 7300;
-    remoteUrlDisplay.innerHTML = '';
-    for (const ip of ips) {
-      if (ip.tailscale && ip.tailscaleHostname) {
-        const url = `https://${ip.tailscaleHostname}:${port}`;
-        const row = document.createElement('div');
-        const label = document.createElement('strong');
-        label.style.color = '#4ecca3';
-        label.textContent = 'Tailscale: ';
-        const link = document.createElement('span');
-        link.textContent = url;
-        link.style.cssText = 'cursor:pointer;text-decoration:underline;';
-        link.title = 'Click to copy';
-        const hint = document.createElement('span');
-        hint.style.cssText = 'font-size:10px;color:#888;margin-left:6px;';
-        hint.textContent = '(click to copy)';
-        link.addEventListener('click', () => {
-          navigator.clipboard.writeText(url).then(() => {
-            hint.textContent = 'Copied!';
-            setTimeout(() => { hint.textContent = '(click to copy)'; }, 1500);
-          });
-        });
-        row.appendChild(label);
-        row.appendChild(link);
-        row.appendChild(hint);
-        remoteUrlDisplay.appendChild(row);
-        const ipRow = document.createElement('div');
-        ipRow.style.cssText = 'color:#888;font-size:11px;margin-left:12px;';
-        ipRow.textContent = `IP: https://${ip.address}:${port}`;
-        remoteUrlDisplay.appendChild(ipRow);
-      } else {
-        const row = document.createElement('div');
-        row.textContent = `https://${ip.address}:${port}`;
-        if (ip.tailscale) {
-          const tag = document.createElement('strong');
-          tag.style.color = '#4ecca3';
-          tag.textContent = '(Tailscale) ';
-          row.prepend(tag);
-        }
-        remoteUrlDisplay.appendChild(row);
-      }
-    }
-  } catch {}
 }
 
 // CW Keyer checkbox toggles config visibility + auto-connect MIDI
@@ -10880,7 +11069,8 @@ serialcatTestBtn.addEventListener('click', async () => {
     // port the same way (RTS/CTS; the FT-817/818/857/897 binary protocol).
     const serialHandshake = (document.getElementById('set-serialcat-handshake') || {}).value || 'auto';
     const model = rigModelSelect ? rigModelSelect.value : '';
-    const result = await window.api.testSerialCat({ portPath, baudRate, dtrOff, serialHandshake, model });
+    const ptt = (document.getElementById('set-serialcat-ptt') || {}).value || 'cat'; // no RTS/CTS trial where RTS keys PTT (#544)
+    const result = await window.api.testSerialCat({ portPath, baudRate, dtrOff, serialHandshake, model, ptt });
     if (result.success) {
       serialcatTestResult.textContent = `Connected! Freq: ${FreqDots.mhzMhz(result.frequency) || result.frequency + ' MHz'}` + (result.note ? ` (${result.note})` : '') + rigTestSavedNote(portPath) + rigTestWsjtxNote(result);
       serialcatTestResult.className = 'hamlib-test-success';
@@ -10982,6 +11172,7 @@ function yaesuLanTargetFromForm() {
     port: parseInt(document.getElementById('set-yaesu-lan-port').value, 10) || 50000,
     username: document.getElementById('set-yaesu-lan-username').value || '',
     password: document.getElementById('set-yaesu-lan-password').value || '',
+    muteMonitor: !!(document.getElementById('set-yaesu-lan-mute-monitor') || {}).checked,
   };
 }
 document.getElementById('yaesu-lan-test-btn')?.addEventListener('click', async () => {
@@ -12836,7 +13027,7 @@ function startScan() {
     if (match !== -1) scanIndex = match;
   }
   scanBtn.textContent = 'Stop';
-  scanBtn.title = 'Press Stop or Spacebar to stop scanning';
+  scanBtn.title = remoteShackPttKey === 'Space' ? 'Press Stop to stop scanning' : 'Press Stop or Spacebar to stop scanning';
   scanBtn.classList.add('scan-active');
   if (!wasScanning) notifyScanState(true);
   scanStep();
@@ -12998,7 +13189,7 @@ document.addEventListener('keydown', (e) => {
     checkFirstRun(true);
     return;
   }
-  if (e.code === 'Space' && !e.target.matches('input, select, textarea')) {
+  if (e.code === 'Space' && remoteShackPttKey !== 'Space' && !e.target.matches('input, select, textarea')) {
     e.preventDefault();
     if (scanning) { stopScan(); } else { startScan(); }
     return;
@@ -13660,10 +13851,6 @@ LOG_OTA_TYPES.forEach(type => {
 let quickLogLookupTimer = null;
 
 function openQuickLog() {
-  if (!enableLogging) {
-    showLogToast('Enable QSO Logging in Settings first', { warn: true, duration: 3000 });
-    return;
-  }
   // W9TEF "ragchew logger" — Ctrl+L now opens the persistent log pop-out
   // window (renderer/log-popout.html) instead of the modal dialog. The
   // spot-click → openLogPopup() path is unchanged: that flow has richer
@@ -13884,9 +14071,7 @@ window.api.onLogPopoutStatus((open) => {
 if (window.api.onVfoPopoutStatus) {
   window.api.onVfoPopoutStatus((open) => {
     if (!open) return;
-    const onFreq = radioFreqKhzExact != null
-      ? allSpots.find(s => Math.abs(parseFloat(s.frequency) - radioFreqKhzExact) < 0.5)
-      : null;
+    const onFreq = radioFreqKhzExact != null ? liveSpotAtFreq(radioFreqKhzExact) : null;
     const spot = (lastTunedSpot && (radioFreqKhzExact == null ||
       Math.abs(parseFloat(lastTunedSpot.frequency) - radioFreqKhzExact) < 0.5)) ? lastTunedSpot : onFreq;
     if (spot) notifyVfoTunedSpot(spot);
@@ -16675,6 +16860,8 @@ logSaveBtn.addEventListener('click', async () => {
           ? 'Could not reach logbook — is it running and configured correctly?'
           : lastResult.logbookError;
         showLogToast(`Logged ${displayCalls} to ADIF, but logbook forwarding failed: ${friendly}`, { warn: true, duration: 8000 });
+      } else if (lastResult.qrzError) {
+        showLogToast(`Logged ${displayCalls}, but QRZ Logbook did not take it: ${lastResult.qrzError}`, { warn: true, duration: 8000 });
       } else {
         // Surface the first re-spot error that fired, with the correct
         // program name so the user knows which network rejected the
@@ -17637,6 +17824,18 @@ const echoCatCopy = document.getElementById('echo-cat-copy');
 const quickAudioInput = document.getElementById('quick-audio-input');
 const quickAudioOutput = document.getElementById('quick-audio-output');
 
+/** ECHOCAT web addresses, home (LAN) first, each with a label. Tailscale
+ *  prefers its MagicDNS name, which its certificate is valid for. */
+function echoCatWebUrls(ips, port) {
+  const list = Array.isArray(ips) ? ips : [];
+  const out = [];
+  const lan = list.find(ip => !ip.tailscale);
+  const ts = list.find(ip => ip.tailscale);
+  if (lan) out.push({ label: 'At home', url: `https://${lan.address}:${port}` });
+  if (ts) out.push({ label: 'Tailscale', url: `https://${ts.tailscaleHostname || ts.address}:${port}` });
+  return out;
+}
+
 async function refreshEchoCatInfo() {
   const s = await window.api.getSettings();
   // ECHOCAT is always-on as of 2026-06-02. The quick toggle was
@@ -17647,7 +17846,7 @@ async function refreshEchoCatInfo() {
     const port = s.remotePort || 7300;
     const token = s.remoteToken || '';
     const ips = await window.api.getLocalIPs();
-    const best = ips.find(ip => ip.tailscale) || ips[0];
+    const urls = echoCatWebUrls(ips, port);
     // ECHOCAT access (lib/remote-access.js): a local address is only real
     // under "Local network and Cloud".
     const access = ['off', 'cloud', 'lan'].includes(s.remoteAccess) ? s.remoteAccess : (s.enableRemote === false ? 'off' : 'lan');
@@ -17655,8 +17854,11 @@ async function refreshEchoCatInfo() {
       echoCatUrl.textContent = 'ECHOCAT access is Off (Settings > ECHOCAT)';
     } else if (access === 'cloud') {
       echoCatUrl.textContent = 'Cloud only — reach this computer through its POTACAT Cloud address';
-    } else if (best) {
-      echoCatUrl.innerHTML = `<span class="echo-cat-ip">https://${best.address}:${port}</span>`;
+    } else if (urls.length) {
+      // Labelled, home address first (#380): a Tailscale address works only
+      // on the tailnet, so it must not be the one someone at home copies.
+      echoCatUrl.innerHTML = urls.map(u =>
+        `<div><span class="echo-cat-ip-label">${u.label}:</span> <span class="echo-cat-ip">${_esc(u.url)}</span></div>`).join('');
     } else {
       echoCatUrl.textContent = 'No network found';
     }
@@ -17730,8 +17932,8 @@ echoCatCopyUrl.addEventListener('click', async () => {
   const s = await window.api.getSettings();
   const port = s.remotePort || 7300;
   const ips = await window.api.getLocalIPs();
-  const best = ips.find(ip => ip.tailscale) || ips[0];
-  const url = best ? `https://${best.address}:${port}` : '';
+  const first = echoCatWebUrls(ips, port)[0];
+  const url = first ? first.url : '';
   try {
     await navigator.clipboard.writeText(url);
     echoCatCopyUrl.textContent = '\u2705';
@@ -18297,6 +18499,7 @@ async function openSettingsDialog(tab) {
   setLotwUploadReminder.checked = s.lotwUploadReminder === true;
   setLotwPassword.value = s.lotwCertPassword || '';
   setLotwAutoDownload.checked = s.lotwAutoDownload === true;
+  setLotwTqslPath.value = s.tqslPath || '';
   setLotwLogin.value = s.lotwLogin || '';
   setLotwWebPassword.value = s.lotwPassword || '';
   lotwConfig.classList.toggle('hidden', !s.lotwEnable);
@@ -18509,9 +18712,6 @@ async function openSettingsDialog(tab) {
     }
     if (s.cwKeyPort) setCwKeyPort.value = s.cwKeyPort;
   } catch { /* ports unavailable */ }
-  if (enableRemote) {
-    populateRemoteURLs();
-  }
   updateRemoteAudioSummary(s.remoteAudioInput, s.remoteAudioOutput);
   // Remote Launcher
   if (setEnableLauncher) {
@@ -19180,6 +19380,7 @@ settingsSave.addEventListener('click', async () => {
     lotwStationLocation: setLotwLocation.value || '',
     lotwCertPassword: setLotwPassword.value || '',
     lotwAutoDownload: setLotwAutoDownload.checked,
+    tqslPath: setLotwTqslPath.value.trim(),
     lotwLogin: setLotwLogin.value.trim(),
     lotwPassword: setLotwWebPassword.value || '',
     clublogEnable: setClublogEnable.checked,
@@ -19484,6 +19685,7 @@ window.api.onSpots((spots) => {
   }
   allSpots = spots;
   render();
+  refreshVfoCardAge();
 });
 
 window.api.onSpotsError((msg) => {
@@ -21947,9 +22149,11 @@ function initDirvHeaderMenu(table) {
 }
 
 // Arrow-key row stepping for every Directory tab (Nets, SWL, Landmarks,
-// Channels). The index is remembered per tab because Nets/SWL show a row as
-// tuned only once the radio echoes the frequency back.
-let _dirKeyNav = { tab: null, idx: -1 };
+// Channels). Where the next step moves from is lib/directory-key-nav.js: kept
+// per tab, and set by a click on a row so the arrows go on from the row the
+// operator clicked (#501).
+const DirKeyNav = window.DirectoryKeyNav;
+let _dirKeyNav = DirKeyNav.initial();
 function directoryRows() {
   const body = dirvActiveTab === 'nets' ? dirvNetsBody : dirvActiveTab === 'swl' ? dirvSwlBody
     : dirvActiveTab === 'landmarks' ? document.getElementById('lmk-body') : document.getElementById('chn-body');
@@ -21960,13 +22164,23 @@ function directoryRows() {
 function directoryArrowStep(step) {
   const rows = directoryRows();
   if (!rows.length) return;
-  let idx = _dirKeyNav.tab === dirvActiveTab ? _dirKeyNav.idx : -1;
-  if (idx < 0 || idx >= rows.length) idx = rows.findIndex((r) => r.matches('.lmk-selected, .dirv-tuned, .chn-tuned'));
-  idx = idx < 0 ? (step > 0 ? 0 : rows.length - 1) : Math.max(0, Math.min(rows.length - 1, idx + step));
-  _dirKeyNav = { tab: dirvActiveTab, idx };
+  const selected = rows.findIndex((r) => r.matches('.lmk-selected, .dirv-tuned, .chn-tuned'));
+  _dirKeyNav = DirKeyNav.step(_dirKeyNav, dirvActiveTab, rows.length, selected, step);
+  const idx = _dirKeyNav.idx;
   rows[idx].click();
   const row = directoryRows()[idx]; // Landmarks and Channels re-render on click
   if (row) row.scrollIntoView({ block: 'nearest' });
+}
+// A click on a row is where the next arrow moves from. Capture phase: the
+// row's own handler may re-render the table (Landmarks, Channels) and detach
+// it before the click bubbles up.
+{
+  const dirView = document.getElementById('directory-view');
+  if (dirView) dirView.addEventListener('click', (e) => {
+    const tr = e.target && e.target.closest ? e.target.closest('tr') : null;
+    if (!tr) return;
+    _dirKeyNav = DirKeyNav.clickAt(_dirKeyNav, dirvActiveTab, directoryRows().indexOf(tr));
+  }, true);
 }
 
 // Directory view tab switching
@@ -22577,7 +22791,7 @@ window.api.onCatFrequency((hz) => {
   // the list at this frequency can be someone else, and the VFO card's first
   // operator fills {op_firstname} (N8JMS 2026-11-02: Joe selected, Michael keyed).
   const onPicked = lastTunedSpot && Math.abs(parseFloat(lastTunedSpot.frequency) - exactKhz) < 0.5;
-  const onSpot = onPicked ? lastTunedSpot : allSpots.find(s => Math.abs(parseFloat(s.frequency) - exactKhz) < 0.5);
+  const onSpot = onPicked ? lastTunedSpot : liveSpotAtFreq(exactKhz);
   if (onSpot) {
     notifyVfoTunedSpot(onSpot);
   } else if (lastTunedSpot && Math.abs(parseFloat(lastTunedSpot.frequency) - exactKhz) >= 0.5) {
@@ -23252,8 +23466,19 @@ function applyRigBandsMain() {
   try { if (currentView === 'directory' && dirvActiveTab === 'landmarks') renderDirectoryView(); } catch { /* not built yet */ }
 }
 if (window.api && window.api.rigBandsGet) {
-  window.api.rigBandsGet().then((d) => { rigBandsList = (d && d.bands) || null; applyRigBandsMain(); }).catch(() => {});
-  window.api.onRigBands((d) => { rigBandsList = (d && d.bands) || null; applyRigBandsMain(); });
+  // A rig switch (or new ticks in the rig editor) re-ticks the Spots band
+  // filter for the new radio (#291): ticks made on an HF radio no longer
+  // empty the table on a VHF one, and a band the new radio adds is shown.
+  const onRigBandsMain = (d) => {
+    rigBandsList = (d && d.bands) || null;
+    rigBandsKnown = true;
+    applyRigBandsMain();
+    if (syncBandFilterToRig()) {
+      try { saveFilters(); updateBandButtonsVisibility(); render(); } catch { /* not built yet */ }
+    }
+  };
+  window.api.rigBandsGet().then(onRigBandsMain).catch(() => {});
+  window.api.onRigBands(onRigBandsMain);
   // The renderer's rig copy is what the editor saves whole: keep the tuner
   // verdict current in it, and redraw the grid if that rig is being edited.
   if (window.api.onRigAtuBands) window.api.onRigAtuBands((d) => {
@@ -24511,6 +24736,13 @@ async function playVoiceAudio(base64, opts) {
   for (var j = 0; j < binary.length; j++) bytes[j] = binary.charCodeAt(j);
 
   var s = await window.api.getSettings();
+  // Yaesu SCU-LAN10 (#227): the radio's audio is the LAN, not a sound card.
+  // The recording is decoded here at 16 kHz (the browser's own resampler,
+  // filtered) and main sends it over the LAN and keys the radio.
+  if (s.audioSource === 'yaesu-lan' && s.catTarget && s.catTarget.type === 'yaesu-lan' && window.api.voiceMacroLan) {
+    playVoiceAudioLan(bytes, idx, btn, opts.label || '');
+    return;
+  }
   var outputDeviceId = s.remoteAudioOutput || '';
   voicePlaybackCtx = new AudioContext();
   if (voicePlaybackCtx.state === 'suspended') await voicePlaybackCtx.resume();
@@ -24554,6 +24786,36 @@ async function playVoiceAudio(base64, opts) {
     voicePlaybackSource.start(0);
     if (monitor) { try { monitor.start(0); } catch (e) {} }
     voicePlaybackSource.onended = function() { stopVoicePlayback(); };
+    if (window.api.voiceMacroPlaying) window.api.voiceMacroPlaying({ playing: true, label: voicePlayingLabel });
+  }, function(err) {
+    console.warn('[Voice] Could not decode the recording:', err && err.message);
+    stopVoicePlayback();
+  });
+}
+
+function playVoiceAudioLan(bytes, idx, btn, label) {
+  voicePlaybackCtx = new AudioContext({ sampleRate: 16000 });
+  voicePlaybackCtx.decodeAudioData(bytes.buffer, function(audioBuffer) {
+    var n = audioBuffer.length, chs = audioBuffer.numberOfChannels;
+    var mono = new Float32Array(n);
+    for (var c = 0; c < chs; c++) {
+      var d = audioBuffer.getChannelData(c);
+      for (var i = 0; i < n; i++) mono[i] += d[i] / chs;
+    }
+    voicePlayingIdx = idx;
+    voicePlayingLabel = label;
+    if (btn) btn.classList.add('active');
+    // Monitor copy on this computer's default output, as on the sound-card path.
+    if (voiceMacroMonitor) {
+      try {
+        voiceMonitorSource = voicePlaybackCtx.createBufferSource();
+        voiceMonitorSource.buffer = audioBuffer;
+        voiceMonitorSource.connect(voicePlaybackCtx.destination);
+        voiceMonitorSource.start(0);
+      } catch (e) { voiceMonitorSource = null; }
+    }
+    // main keys the radio and sends 'stop-voice-macro' when the recording is out.
+    window.api.voiceMacroLan({ samples: mono, sampleRate: audioBuffer.sampleRate, label: label });
     if (window.api.voiceMacroPlaying) window.api.voiceMacroPlaying({ playing: true, label: voicePlayingLabel });
   }, function(err) {
     console.warn('[Voice] Could not decode the recording:', err && err.message);
@@ -25605,7 +25867,9 @@ function rigApplyCapabilities(caps) {
   if (rigWnbBtn) rigWnbBtn.style.display = caps.wnb ? '' : 'none';
   // #485: powerOn false = the radio switches off over CAT but not on (FTX-1).
   rigPowerOnBtn.style.display = caps.power && caps.powerOn !== false ? '' : 'none';
-  rigPowerOffBtn.style.display = caps.power ? '' : 'none';
+  // #293: powerOff false = POTACAT could not switch it back on, and the
+  // operator has not allowed Power Off for this rig.
+  rigPowerOffBtn.style.display = caps.power && caps.powerOff !== false ? '' : 'none';
   rigRfGain.closest('.rig-popover-row').style.display = caps.rfgain ? '' : 'none';
   // Radio-native RF gain steps (Flex): swap the 0-100 slider for a dB select
   // populated from the model's step list. The slider's -10..+20 dB mapping
@@ -27359,6 +27623,7 @@ function showWelcomeRigItem(rig) {
   removeBtn.className = 'rig-item-btn rig-delete-btn';
   removeBtn.textContent = '\u2715';
   removeBtn.title = 'Remove';
+  removeBtn.setAttribute('aria-label', 'Remove ' + (rig.name || 'Unnamed Rig'));
   removeBtn.addEventListener('click', (e) => {
     e.stopPropagation();
     welcomeRig = null;
@@ -33317,6 +33582,28 @@ window.api.onJtcatStopForRemote(function() {
 if (window.api.onJtcatTakeoverNotice) {
   window.api.onJtcatTakeoverNotice(function(data) {
     showLogToast((data && data.message) || 'Mobile device took over FT8 — JTCAT popout closed.', { duration: 6000 });
+  });
+}
+// Transmit audio input question (#594): a TS-480 with no answer saved is not
+// keyed; main asks here, saves the answer on the rig and reconnects CAT.
+if (window.api.onTxAudioInputAsk) {
+  window.api.onTxAudioInputAsk(function(data) {
+    const dlg = document.getElementById('tx-audio-input-dialog');
+    if (!dlg || !data || !data.rigId) return;
+    if (dlg.open) return;
+    const text = document.getElementById('tx-audio-input-text');
+    if (text) text.textContent = (data.help || '') + (data.radioName ? ' Radio: ' + data.radioName + '.' : '');
+    const answer = function(choice) {
+      dlg.close();
+      if (!choice) return;
+      const rig = (typeof currentRigs !== 'undefined' && currentRigs) ? currentRigs.find(r => r.id === data.rigId) : null;
+      if (rig) rig.txAudioInput = choice; // keep the editor's copy in step with the saved rig
+      window.api.setTxAudioInput({ rigId: data.rigId, choice: choice });
+    };
+    document.getElementById('tx-audio-input-rear').onclick = function() { answer('rear'); };
+    document.getElementById('tx-audio-input-front').onclick = function() { answer('front'); };
+    document.getElementById('tx-audio-input-later').onclick = function() { answer(null); };
+    dlg.showModal();
   });
 }
 // Generic main-process notices (radio link lost/restored, etc.) — same
