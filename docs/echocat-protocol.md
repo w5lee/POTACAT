@@ -122,6 +122,7 @@ The `status` message is a kitchen-sink snapshot. The canonical fields are:
 | `filterWidth` | number | Hz |
 | `rfgain` | number | 0–255 |
 | `txpower` | number | TX power *setting* (slider) |
+| `txPowerUnit` | string | Optional, added 2026-11-16 (#195). `'%'` = `txpower` is a drive percentage, not watts (a Zeus or Thetis rig over TCI); label the slider `%` and never show it as watts. Absent = watts, as before. |
 | `smeter` | number | live S-meter (Gap 10) |
 | `swr` | number | live SWR (Gap 10) |
 | `alc` | number | live ALC (Gap 10) |
@@ -338,11 +339,13 @@ and non-private respectively. The predicate is the thread store's own
 
 | Message | Dir | Purpose |
 |---|---|---|
-| `freedv-start` | C→S | Start the FreeDV engine. |
-| `freedv-stop` | C→S | Stop. |
+| `freedv-start` | C→S | Start the FreeDV engine on the shack (`mode` optional). If FreeDV is off in settings the shack replies with `freedv-status` instead. |
+| `freedv-stop` | C→S | Stop. The radio audio returns to the track. |
 | `freedv-set-mode` | C→S | RADE V1 / 700D / etc. |
-| `freedv-set-tx` | C→S | TX enable. |
-| `freedv-set-squelch` | C→S | Squelch level. |
+| `freedv-set-tx` | C→S | TX enable: `on` (the server also reads `enabled`). FreeDV cannot transmit yet: `on: true` is refused with `ptt-refused { kind: 'freedv', message }` and `tune-blocked { reason }`. |
+| `freedv-set-squelch` | C→S | `{ enabled, threshold }` (dB). |
+| `freedv-sync` | S→C | `{ sync, snr }` on every engine change. ECHOCAT Web uses it; the phone uses `freedv-status`. |
+| `freedv-status` | S→C | `{ state: 'off'\|'starting'\|'running'\|'unavailable', mode, modes[], rx, tx, sync, snr (float dB or null), reason, reasonCode, callsign, callsignAt }`. After every auth-ok and on change; sync/SNR at most 4 per second (a sync flip or a 1 dB SNR move). `reason` is a sentence to show as is; `reasonCode` (`disabled`, `no-decoder`, `too-slow`, `tx-not-built`) is for placement and tests. `tx` is false and `callsign` null until FreeDV transmit exists. Capability `freedv-remote-rx`: decoded FreeDV speech is on the audio track while FreeDV runs (the raw radio audio is muted), at about the level of SSB receive audio. |
 | `set-freedv` | C→S | Master FreeDV on/off toggle. |
 | `freedv-enabled` | S→C | Server tells client whether the FreeDV master toggle is on (sent at startup + on changes). |
 
@@ -419,7 +422,7 @@ shows the modes it is sent in `winlink-state.modes` and nothing else.
 | `winlink-state` | S→C | The one payload every surface renders; fields in the table below. Never carries the password or a message body. Sent coalesced (about 50 ms) after any change, and again with every `winlink-session`. |
 | `winlink-mailbox` | S→C | One folder: `{box, messages[], total}`. `messages` = the newest 500, newest first, without bodies; `total` = how many the folder holds. Each message: `mid`, `box`, `from`, `to[]`, `cc[]`, `subject`, `date`, `read` (always true outside `in`), `p2pOnly`, `attachments[{name, size}]`. Pushed to every owner device when a folder changes; also the reply to `winlink-list` (then with `reqId`). |
 | `winlink-session` | S→C | `{session}`: the running or last session; fields in the table below. Pushed on every change: progress, PTT, a prompt, the end. |
-| `winlink-spectrum` | S→C | The waterfall, about 10 a second, only to owner devices that sent `winlink-watch {on: true}`; a frame is dropped, never queued, for a device whose socket is behind. `bins` = 128 values over 0 to 3000 Hz (0 = noise floor, 255 = +50 dB); `lo`, `hi` = the modem's band as fractions of that width, with `label`; `busy` and `peakDb` = the Busy / Clear verdict, decided on the shack. |
+| `winlink-spectrum` | S→C | The waterfall, about 10 a second, only to owner devices that sent `winlink-watch {on: true}`; a frame is dropped, never queued, for a device whose socket is behind. `bins` = 128 values over 0 to 3000 Hz (0 = noise floor, 255 = +50 dB); `lo`, `hi` = the modem's band as fractions of that width, with `label`; `busy` and `peakDb` = the Busy / Clear verdict, decided on the shack. Optional (#669): `inputDb` = the modem's receive input level, whole dBFS, peak held 0.5 s (null = no audio: show nothing); `inputHot` = true at or above -3 dBFS (show "Input too high"). Rule: `lib/winlink-wf-audio.js` `wireInput`. A shack without them omits both. |
 | `winlink-refused` | S→C | `{reason: 'guest-pass', reqId?}`: a Guest Pass session sent a Winlink message. The only reason in use. |
 
 `winlink-state` fields:

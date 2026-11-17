@@ -3340,7 +3340,7 @@
     }
     if (s.txpower !== undefined) {
       rcTxPowerSlider.value = s.txpower;
-      rcTxPowerVal.textContent = s.txpower + ((s.capabilities || rigCapabilities).powerUnit === '%' ? '%' : '');
+      rcTxPowerVal.textContent = s.txpower;
     }
     if (s.micGain !== undefined && s.micGain !== null) applyMicGainState(s.micGain);
     if (s.capabilities) {
@@ -5726,7 +5726,7 @@
 
   // TX Power slider
   rcTxPowerSlider.addEventListener('input', () => {
-    rcTxPowerVal.textContent = rcTxPowerSlider.value + (rigCapabilities.powerUnit === '%' ? '%' : '');
+    rcTxPowerVal.textContent = rcTxPowerSlider.value;
   });
   rcTxPowerSlider.addEventListener('change', () => {
     if (ws && ws.readyState === WebSocket.OPEN) {
@@ -15353,7 +15353,7 @@ var _paddleHoldTimer = { dit: null, dah: null };
     }
     if (vfTxPowerSlider) {
       vfTxPowerSlider.addEventListener('input', () => {
-        vfTxPowerVal.textContent = vfTxPowerSlider.value + (rigCapabilities.powerUnit === '%' ? '%' : '');
+        vfTxPowerVal.textContent = vfTxPowerSlider.value;
       });
       vfTxPowerSlider.addEventListener('change', () => {
         if (ws && ws.readyState === WebSocket.OPEN) {
@@ -15485,7 +15485,7 @@ var _paddleHoldTimer = { dit: null, dah: null };
       }
       if (s.txpower !== undefined && vfTxPowerSlider) {
         vfTxPowerSlider.value = s.txpower;
-        if (vfTxPowerVal) vfTxPowerVal.textContent = s.txpower + ((s.capabilities || rigCapabilities).powerUnit === '%' ? '%' : '');
+        if (vfTxPowerVal) vfTxPowerVal.textContent = s.txpower;
       }
     };
     window.__vfRenderVoiceMacros = renderVfVoice;

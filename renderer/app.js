@@ -1317,9 +1317,9 @@ const lotwConfig = document.getElementById('lotw-config');
 const setLotwLocation = document.getElementById('set-lotw-location');
 const setLotwPassword = document.getElementById('set-lotw-password');
 const setLotwUploadReminder = document.getElementById('set-lotw-upload-reminder');
+const setLotwAutoDownload = document.getElementById('set-lotw-auto-download');
 const lotwUploadBtn = document.getElementById('lotw-upload-btn');
 const lotwUploadResult = document.getElementById('lotw-upload-result');
-const setLotwAutoDownload = document.getElementById('set-lotw-auto-download');
 const setLotwLogin = document.getElementById('set-lotw-login');
 const setLotwTqslPath = document.getElementById('set-lotw-tqsl-path');
 const setLotwWebPassword = document.getElementById('set-lotw-web-password');
@@ -1545,11 +1545,6 @@ function setRigRxLevelField(v) {
   if (rigRxLevelVal) rigRxLevelVal.textContent = fmtRxLevelDb(n);
 }
 // Full power (W), rig.fullPowerW (lib/rig-full-power.js): blank = the model's.
-const rigLogPowerOverride = document.getElementById('set-rig-log-power-override');
-function readRigLogPowerOverride() {
-  const watts = rigLogPowerOverride.valueAsNumber;
-  return Number.isFinite(watts) && watts > 0 ? watts : null;
-}
 function readRigFullPowerField() {
   const el = document.getElementById('set-rig-full-power');
   const v = el ? parseFloat(el.value) : NaN;
@@ -1903,16 +1898,8 @@ async function openCatPopover(anchor) {
     return;
   }
   const settings = await window.api.getSettings();
-  if (settings.tciTestLink) {
-    catPopoverRigs.replaceChildren(renderTciTestRig(settings.tciTestLink, 'cat-popover-rig'));
-    positionCatPopover();
-    catPopover.classList.remove('hidden');
-    catPopoverOpen = true;
-    return;
-  }
   const rigs = settings.rigs || [];
   const activeId = settings.activeRigId || null;
-  const activeTci = settings.catTarget?.type === 'tci';
 
   // Build rig list
   catPopoverRigs.innerHTML = '';
@@ -1928,8 +1915,8 @@ async function openCatPopover(anchor) {
     </div>
   `;
   noneEl.addEventListener('click', async () => {
-    if (!activeTci) window.api.connectCat(null);
-    await window.api.saveSettings({ activeRigId: null, ...(activeTci ? { catTarget: null } : {}) });
+    window.api.connectCat(null);
+    await window.api.saveSettings({ activeRigId: null });
     activeRigName = '';
     activeRigCatLabel = '';
     refreshCatPillLabel();
@@ -1956,7 +1943,7 @@ async function openCatPopover(anchor) {
     rigEl.appendChild(dot);
     rigEl.appendChild(info);
     rigEl.addEventListener('click', async () => {
-      if (!activeTci && rig.catTarget?.type !== 'tci') window.api.connectCat(rig.catTarget);
+      window.api.connectCat(rig.catTarget);
       await window.api.saveSettings({
         activeRigId: rig.id,
         catTarget: rig.catTarget,
@@ -2565,51 +2552,45 @@ function rigAudioSourceOf(rig) {
     ? v : window.RigFamily.defaultAudioSourceFor(fam);
 }
 
+// Zeus / Thetis over TCI (lib/tci-target.js). The Settings rig editor and the
+// Welcome editor share these field helpers; prefix 'rig' or 'welcome'.
 function tciRigFields(prefix) {
-  const field = suffix => document.getElementById(`${prefix}-tci-${suffix}`);
-  return { server: field('server'), host: field('host'), port: field('port'),
-    enginePort: field('engine-port'), engineRow: field('engine-row'),
-    autoStart: field('auto-start'), check: field('check'), result: field('result') };
+  const el = (k) => document.getElementById(`${prefix}-tci-${k}`);
+  return { server: el('server'), host: el('host'), port: el('port'), autoStart: el('auto-start'), check: el('check'), result: el('result') };
 }
-
-function readTciRigTarget({ server, host, port, enginePort, autoStart }) {
-  const target = { type: 'tci', server: server.value, host: host.value.trim(), port: port.valueAsNumber, autoStart: autoStart.checked };
-  if (server.value === 'zeus' && enginePort.value) target.enginePort = enginePort.valueAsNumber;
-  return target;
+function readTciRigTarget(f) {
+  return window.TciTarget.normalize({ server: f.server.value, host: f.host.value, port: f.port.valueAsNumber, autoStart: f.autoStart.checked });
 }
-
-function fillTciRigFields(fields, target = {}) {
-  const { server, host, port, enginePort, engineRow, autoStart, result } = fields;
-  autoStart.checked = target.autoStart !== false;
-  server.value = target.server || 'zeus';
-  host.value = target.host || '127.0.0.1';
-  port.value = target.port ?? (server.value === 'thetis' ? 50001 : 40001);
-  enginePort.value = target.enginePort ?? '';
-  engineRow.classList.toggle('hidden', server.value !== 'zeus');
-  result.textContent = '';
+function fillTciRigFields(f, target) {
+  const t = window.TciTarget.normalize(target || {});
+  f.server.value = t.server;
+  f.host.value = t.host;
+  f.port.value = t.port;
+  f.autoStart.checked = t.autoStart;
+  f.result.textContent = '';
 }
-
-function wireTciRigFields(fields) {
-  const { server, port, engineRow, check, result } = fields;
-  server.addEventListener('change', () => {
-    port.value = server.value === 'thetis' ? 50001 : 40001;
-    engineRow.classList.toggle('hidden', server.value !== 'zeus');
-    result.textContent = '';
+function wireTciRigFields(f) {
+  if (!f.server) return;
+  f.server.addEventListener('change', () => {
+    f.port.value = window.TciTarget.SERVERS[f.server.value].port;
+    f.result.textContent = '';
   });
-  check.addEventListener('click', async () => {
-    check.disabled = true;
-    result.textContent = 'Checking TCI connection…';
+  f.check.addEventListener('click', async () => {
+    const target = readTciRigTarget(f);
+    const bad = window.TciTarget.validate(target);
+    if (bad) { f.result.textContent = bad; return; }
+    f.check.disabled = true;
+    f.result.textContent = `Checking ${window.TciTarget.describe(target)}...`;
     try {
-      const response = await window.api.probeTciRig(readTciRigTarget(fields));
-      result.textContent = response.ok ? 'TCI server is ready.' : response.error;
-    } catch (error) {
-      result.textContent = error.message;
+      const r = await window.api.probeTciRig(target);
+      f.result.textContent = r && r.ok ? 'The TCI server is ready.' : ((r && r.error) || 'No answer from the TCI server.');
+    } catch (err) {
+      f.result.textContent = err.message;
     } finally {
-      check.disabled = false;
+      f.check.disabled = false;
     }
   });
 }
-
 const rigTciFields = tciRigFields('rig');
 const welcomeTciFields = tciRigFields('welcome');
 wireTciRigFields(rigTciFields);
@@ -2678,7 +2659,7 @@ function updateFlexStatus() {
 
 async function populateRadioSection(currentTarget) {
   hamlibFieldsLoaded = false;
-  fillTciRigFields(rigTciFields, currentTarget?.type === 'tci' ? currentTarget : undefined);
+  fillTciRigFields(rigTciFields, currentTarget && currentTarget.type === 'tci' ? currentTarget : null);
   if (!currentTarget) {
     setRadioType('flex');
   } else if (currentTarget.type === 'tci') {
@@ -3258,9 +3239,7 @@ function shortSerialPath(path) {
 
 function describeRigTarget(target) {
   if (!target) return 'Not configured';
-  if (target.type === 'tci') {
-    return `${target.server === 'thetis' ? 'Thetis' : 'Zeus'} TCI at ${target.host}:${target.port}`;
-  }
+  if (target.type === 'tci') return window.TciTarget.describe(target);
   if (target.type === 'tcp') {
     const host = target.host || '127.0.0.1';
     const port = target.port || 5002;
@@ -3315,117 +3294,11 @@ function describeRigTarget(target) {
   return 'Unknown';
 }
 
-// The isolated build stores its TCI setup separately from normal CAT rigs.
-function renderTciTestRig(link, rowClass) {
-  const { connected, host, port, server } = link;
-  const row = document.createElement('div');
-  row.className = rowClass + ' active';
-  const info = document.createElement('div');
-  info.className = rowClass + '-info';
-  const name = document.createElement('div');
-  name.className = rowClass + '-name';
-  name.textContent = server === 'thetis' ? 'Thetis TCI' : 'Zeus TCI';
-  const description = document.createElement('div');
-  description.className = rowClass + '-desc';
-  description.textContent = connected
-    ? `TCI linked on ${host}:${port}`
-    : `TCI disconnected on ${host}:${port} · Open JTCAT to connect`;
-  info.append(name, description);
-  row.append(info);
-  if (rowClass === 'rig-item') {
-    const edit = document.createElement('button');
-    edit.type = 'button';
-    edit.className = 'rig-item-btn';
-    edit.textContent = 'Edit';
-    edit.addEventListener('click', () => openTciTestEditor(link, 'tci-test-settings-slot'));
-    row.append(edit);
-  }
-  return row;
-}
-
-const tciTestEditor = document.getElementById('tci-test-editor');
-const tciTestServer = document.getElementById('tci-test-server');
-const tciTestHost = document.getElementById('tci-test-host');
-const tciTestPortInput = document.getElementById('tci-test-port');
-const tciTestSetupResult = document.getElementById('tci-test-setup-result');
-const tciTestCheck = document.getElementById('tci-test-check');
-const tciTestSave = document.getElementById('tci-test-save');
-const tciTestCancel = document.getElementById('tci-test-cancel');
-const welcomeTciSetup = document.getElementById('welcome-tci-setup');
-let tciTestEndpoints;
-
-function loadTciTestEndpoint() {
-  const { host, port } = tciTestEndpoints[tciTestServer.value];
-  tciTestHost.value = host;
-  tciTestPortInput.value = port;
-  tciTestSetupResult.textContent = '';
-}
-
-function openTciTestEditor({ server, endpoints, setup }, slotId) {
-  tciTestEndpoints = endpoints;
-  tciTestServer.value = server;
-  loadTciTestEndpoint();
-  document.getElementById(slotId).appendChild(tciTestEditor);
-  document.getElementById('tci-test-help-title').textContent = setup.title;
-  document.getElementById('tci-test-help-steps').replaceChildren(...setup.steps.map(step => {
-    const item = document.createElement('li');
-    item.textContent = step;
-    return item;
-  }));
-  document.getElementById('tci-test-help-why').textContent = setup.why;
-  tciTestEditor.classList.remove('hidden');
-  tciTestServer.focus();
-}
-
-welcomeTciSetup.addEventListener('click', async () => {
-  const { tciTestLink } = await window.api.getSettings();
-  if (tciTestLink) openTciTestEditor(tciTestLink, 'welcome-tci-slot');
-});
-tciTestServer.addEventListener('change', loadTciTestEndpoint);
-tciTestCancel.addEventListener('click', () => tciTestEditor.classList.add('hidden'));
-tciTestCheck.addEventListener('click', () => runTciTestSetup(false));
-tciTestSave.addEventListener('click', () => runTciTestSetup(true));
-
-async function runTciTestSetup(apply) {
-  if (!tciTestHost.reportValidity() || !tciTestPortInput.reportValidity()) return;
-  const endpoint = {
-    server: tciTestServer.value,
-    host: tciTestHost.value.trim(),
-    port: tciTestPortInput.valueAsNumber,
-  };
-  const controls = [tciTestServer, tciTestHost, tciTestPortInput, tciTestCheck, tciTestSave, tciTestCancel];
-  for (const control of controls) control.disabled = true;
-  tciTestSetupResult.textContent = `Checking TCI at ${endpoint.host}:${endpoint.port}…`;
-  try {
-    const result = await window.api.tciTestSetup(endpoint, apply);
-    if (!result.ok) {
-      tciTestSetupResult.textContent = result.error;
-      return;
-    }
-    tciTestSetupResult.textContent = apply ? 'Saved. Open JTCAT to check receive audio.' : 'TCI server is ready.';
-    if (apply) {
-      const { tciTestLink } = await window.api.getSettings();
-      tciTestEndpoints = tciTestLink.endpoints;
-      myRigsList.replaceChildren(renderTciTestRig(tciTestLink, 'rig-item'));
-    }
-  } catch (error) {
-    tciTestSetupResult.textContent = error.message;
-  } finally {
-    for (const control of controls) control.disabled = false;
-  }
-}
-
-function renderRigList(rigs, activeRigId, tciTestLink) {
+function renderRigList(rigs, activeRigId) {
   myRigsList.innerHTML = '';
   currentRigs = rigs || [];
   currentActiveRigId = activeRigId || null;
   if (window.refreshWinlinkAudioRow) window.refreshWinlinkAudioRow();
-  rigAddBtn.hidden = !!tciTestLink;
-  tciTestEditor.classList.add('hidden');
-  if (tciTestLink) {
-    myRigsList.appendChild(renderTciTestRig(tciTestLink, 'rig-item'));
-    return;
-  }
 
   // "None" option
   const noneItem = document.createElement('div');
@@ -3868,7 +3741,6 @@ async function openRigEditor(mode, rigId) {
       await populateRigAudioDevices(rig.remoteAudioInput, rig.remoteAudioOutput);
       setRigRxLevelField(rig.rxLevelDb);
       setRigFullPowerField(rig.fullPowerW);
-      rigLogPowerOverride.value = rig.logPowerOverrideW ?? '';
       // Restore per-rig CW key port
       if (setCwKeyPort && rig.cwKeyPort) setCwKeyPort.value = rig.cwKeyPort;
       // Restore per-rig CW keying line (DTR/RTS override; default 'auto')
@@ -3916,7 +3788,6 @@ async function openRigEditor(mode, rigId) {
     if (setCwKeyLine) setCwKeyLine.value = 'auto';
     if (setRadioNr) setRadioNr.value = '1';
     setRigFullPowerField(null);
-    rigLogPowerOverride.value = '';
     const fh = document.getElementById('set-flex-api-host');
     if (fh) fh.value = '';
     setRadioType('flex');
@@ -4007,9 +3878,9 @@ async function saveRigEditor() {
   const name = setRigName.value.trim() || 'Unnamed Rig';
   const rigCatLabelVal = (document.getElementById('set-rig-cat-label')?.value || '').trim().toUpperCase().slice(0, 4);
   const catTarget = buildCatTargetFromForm();
-  if (catTarget?.type === 'tci') {
-    const error = await window.api.validateTciRig(catTarget);
-    if (error) { rigTciFields.result.textContent = error; return false; }
+  if (catTarget && catTarget.type === 'tci') {
+    const bad = window.TciTarget.validate(catTarget);
+    if (bad) { rigTciFields.result.textContent = bad; return false; }
   }
   const model = rigModelSelect ? rigModelSelect.value || null : null;
 
@@ -4099,7 +3970,6 @@ async function saveRigEditor() {
       rig.remoteAudioOutput = rigAudioOut;
       rig.rxLevelDb = rigRxLevelDb;
       rig.fullPowerW = readRigFullPowerField();
-      rig.logPowerOverrideW = readRigLogPowerOverride();
       rig.audioSource = rigAudioSource;
       rig.cwKeyPort = rigCwKeyPortVal;
       rig.cwKeyLine = rigCwKeyLineVal;
@@ -4132,7 +4002,6 @@ async function saveRigEditor() {
       remoteAudioOutput: rigAudioOut,
       rxLevelDb: rigRxLevelDb,
       fullPowerW: readRigFullPowerField(),
-      logPowerOverrideW: readRigLogPowerOverride(),
       audioSource: rigAudioSource,
       cwKeyPort: rigCwKeyPortVal,
       cwKeyLine: rigCwKeyLineVal,
@@ -18497,8 +18366,8 @@ async function openSettingsDialog(tab) {
   sotaUploadConfig.classList.toggle('hidden', !s.sotaUpload);
   setLotwEnable.checked = s.lotwEnable === true;
   setLotwUploadReminder.checked = s.lotwUploadReminder === true;
-  setLotwPassword.value = s.lotwCertPassword || '';
   setLotwAutoDownload.checked = s.lotwAutoDownload === true;
+  setLotwPassword.value = s.lotwCertPassword || '';
   setLotwTqslPath.value = s.tqslPath || '';
   setLotwLogin.value = s.lotwLogin || '';
   setLotwWebPassword.value = s.lotwPassword || '';
@@ -18736,7 +18605,7 @@ async function openSettingsDialog(tab) {
   renderLookPickers();
   hamlibTestResult.textContent = '';
   hamlibTestResult.className = '';
-  renderRigList(s.rigs || [], s.activeRigId || null, s.tciTestLink);
+  renderRigList(s.rigs || [], s.activeRigId || null);
   closeRigEditor();
   // Update connection status pills
   updateSettingsConnBar();
@@ -19377,9 +19246,9 @@ settingsSave.addEventListener('click', async () => {
     sotaPassword: sotaPasswordVal,
     lotwEnable: setLotwEnable.checked,
     lotwUploadReminder: setLotwUploadReminder.checked,
+    lotwAutoDownload: setLotwAutoDownload.checked,
     lotwStationLocation: setLotwLocation.value || '',
     lotwCertPassword: setLotwPassword.value || '',
-    lotwAutoDownload: setLotwAutoDownload.checked,
     tqslPath: setLotwTqslPath.value.trim(),
     lotwLogin: setLotwLogin.value.trim(),
     lotwPassword: setLotwWebPassword.value || '',
@@ -22822,7 +22691,8 @@ let lastLogPower = 0; // last power value entered by user in log dialog (sticky)
 // The power a log form starts with, or null for an empty box: never a
 // guessed 100 W (#523, lib/log-tx-power.js).
 function logFormPower() {
-  if (rigCurrentCaps.powerUnit === '%') return null;
+  // A TCI rig's level is a drive percent: never offered as watts.
+  if (rigCurrentCaps.powerUnit === '%') return lastLogPower > 0 ? lastLogPower : null;
   return LogTxPower.txPowerForLog({
     knownW: rigKnownPower > 0 ? rigKnownPower : radioPower, // main's level is the newer (a set lands there first)
     enteredW: lastLogPower,
@@ -25676,8 +25546,9 @@ function formatFilterWidth(hz) {
 
 function rigFormatPower(watts) {
   const decimals = Math.max(0, parseInt(rigCurrentCaps.powerDecimals || 0, 10));
-  const numeric = Number(watts);
+  // A TCI rig's level is its drive in percent, not watts.
   const unit = rigCurrentCaps.powerUnit === '%' ? '%' : 'W';
+  const numeric = Number(watts);
   if (!Number.isFinite(numeric)) return watts + unit;
   return numeric.toFixed(decimals) + unit;
 }
@@ -27118,6 +26989,7 @@ let freedvAudioCtx = null;
 let freedvAudioStream = null;
 let freedvProcessor = null;
 let freedvRxPlaybackCtx = null;
+let freedvRxPlaybackTime = 0;  // freedvRxPlaybackCtx time the next decoded chunk starts at
 let freedvTxOutputCtx = null;
 let freedvMicStream = null;
 let freedvMicCtx = null;
@@ -27264,18 +27136,28 @@ window.api.onFreedvAutoStop(() => {
 // RX speech playback — decoded voice through speakers
 window.api.onFreedvRxSpeech(async (data) => {
   try {
-    if (!freedvRxPlaybackCtx || freedvRxPlaybackCtx.state === 'closed') {
-      freedvRxPlaybackCtx = new AudioContext({ sampleRate: 8000 });
+    // The codec's speech rate: 8 kHz, but 16 kHz (wideband) for RADE.
+    const rate = data.rate || 8000;
+    if (!freedvRxPlaybackCtx || freedvRxPlaybackCtx.state === 'closed' || freedvRxPlaybackCtx.sampleRate !== rate) {
+      if (freedvRxPlaybackCtx && freedvRxPlaybackCtx.state !== 'closed') freedvRxPlaybackCtx.close().catch(() => {});
+      freedvRxPlaybackCtx = new AudioContext({ sampleRate: rate });
+      freedvRxPlaybackTime = 0;
     }
     const samples = new Int16Array(data.samples);
     const floats = new Float32Array(samples.length);
     for (let i = 0; i < samples.length; i++) floats[i] = samples[i] / 32768;
-    const buffer = freedvRxPlaybackCtx.createBuffer(1, floats.length, 8000);
+    const buffer = freedvRxPlaybackCtx.createBuffer(1, floats.length, rate);
     buffer.getChannelData(0).set(floats);
     const source = freedvRxPlaybackCtx.createBufferSource();
     source.buffer = buffer;
     source.connect(freedvRxPlaybackCtx.destination);
-    source.start();
+    // Back to back: decoding runs in bursts (RADE's 120 ms frames span 80 ms
+    // audio blocks), so a chunk started on arrival overlaps the last one or
+    // leaves a gap. After a gap, start again 50 ms out to absorb the jitter.
+    const now = freedvRxPlaybackCtx.currentTime;
+    if (freedvRxPlaybackTime < now) freedvRxPlaybackTime = now + 0.05;
+    source.start(freedvRxPlaybackTime);
+    freedvRxPlaybackTime += buffer.duration;
   } catch {}
 });
 
@@ -27477,8 +27359,8 @@ function getWelcomeRadioType() {
 function updateWelcomeRadioSubPanels() {
   const type = getWelcomeRadioType();
   document.getElementById('welcome-flex-config').classList.toggle('hidden', type !== 'flex');
-  document.getElementById('welcome-tci-config').classList.toggle('hidden', type !== 'tci');
   document.getElementById('welcome-tcpcat-config').classList.toggle('hidden', type !== 'tcpcat');
+  document.getElementById('welcome-tci-config').classList.toggle('hidden', type !== 'tci');
   document.getElementById('welcome-serialcat-config').classList.toggle('hidden', type !== 'serialcat');
   document.getElementById('welcome-icom-config').classList.toggle('hidden', type !== 'icom');
   document.getElementById('welcome-hamlib-config').classList.toggle('hidden', type !== 'hamlib');
@@ -27641,9 +27523,9 @@ document.querySelectorAll('input[name="welcome-radio-type"]').forEach((btn) => {
 });
 
 document.getElementById('welcome-rig-add-btn').addEventListener('click', () => {
+  fillTciRigFields(welcomeTciFields, null);
   welcomeHamlibLoaded = false;
   welcomeSerialcatLoaded = false;
-  fillTciRigFields(welcomeTciFields);
   document.getElementById('welcome-rig-editor').classList.remove('hidden');
   document.getElementById('welcome-rig-add-btn').classList.add('hidden');
   document.getElementById('welcome-rig-name').value = '';
@@ -27657,12 +27539,12 @@ document.getElementById('welcome-rig-cancel-btn').addEventListener('click', () =
   document.getElementById('welcome-rig-add-btn').classList.remove('hidden');
 });
 
-document.getElementById('welcome-rig-save-btn').addEventListener('click', async () => {
+document.getElementById('welcome-rig-save-btn').addEventListener('click', () => {
   const name = document.getElementById('welcome-rig-name').value.trim() || 'My Radio';
   const catTarget = buildWelcomeCatTarget();
-  if (catTarget?.type === 'tci') {
-    const error = await window.api.validateTciRig(catTarget);
-    if (error) { welcomeTciFields.result.textContent = error; return; }
+  if (catTarget && catTarget.type === 'tci') {
+    const bad = window.TciTarget.validate(catTarget);
+    if (bad) { welcomeTciFields.result.textContent = bad; return; }
   }
   welcomeRig = { id: 'rig_' + Date.now(), name, catTarget };
   // Keep POTACAT's audio/tune slice in sync with the chosen Flex CAT shim port
@@ -27753,7 +27635,6 @@ document.getElementById('welcome-start').addEventListener('click', async () => {
       saveData.rigs = [...existingRigs, welcomeRig];
     }
     saveData.activeRigId = welcomeRig.id;
-    if (welcomeRig.catTarget?.type === 'tci') saveData.catTarget = welcomeRig.catTarget;
     // Per-rig audio source. New Flex setup defaults to SmartSDR Direct so
     // FT8/SSTV audio streams straight to the radio with no DAX program and
     // no device config — the "Local/DAX" default was the #1 "PTT keys but
@@ -28096,9 +27977,7 @@ async function checkFirstRun(force = false) {
     const welcomeRigDisplay = document.getElementById('welcome-rig-display');
     welcomeRigDisplay.innerHTML = '';
     welcomeRigDisplay.classList.add('hidden');
-    document.getElementById('welcome-rig-add-btn').classList.toggle('hidden', !!s.tciTestLink);
-    welcomeTciSetup.classList.toggle('hidden', !s.tciTestLink);
-    if (tciTestEditor.parentElement.id === 'welcome-tci-slot') tciTestEditor.classList.add('hidden');
+    document.getElementById('welcome-rig-add-btn').classList.remove('hidden');
     document.getElementById('welcome-rig-editor').classList.add('hidden');
     // Pre-fill with existing settings when forced (not fresh install)
     if (force) {
@@ -28143,7 +28022,7 @@ async function checkFirstRun(force = false) {
       // Show existing active rig if any
       const rigs = s.rigs || [];
       const activeRig = rigs.find(r => r.id === s.activeRigId) || rigs[0];
-      if (activeRig && !s.tciTestLink) {
+      if (activeRig) {
         welcomeRig = activeRig;
         showWelcomeRigItem(activeRig);
       }
@@ -28583,10 +28462,6 @@ function resumeActivation(activation) {
       timeOn: c.timeOn || '',
       rstSent: c.rstSent || '',
       rstRcvd: c.rstRcvd || '',
-      txPower: c.txPower || '',
-      myRig: c.myRig || '',
-      myGridsquare: c.myGridsquare || '',
-      state: c.state || '',
       stationCallsign: myCallsign || '',
       operator: myCallsign || '',
       // Preserve the P2P side so re-export keeps SIG/SIG_INFO
@@ -29195,9 +29070,6 @@ function buildActivationAdifQsos(act) {
     timeOn: c.timeOn || '',
     rstSent: c.rstSent || '',
     rstRcvd: c.rstRcvd || '',
-    txPower: c.txPower || '',
-    myRig: c.myRig || '',
-    state: c.state || '',
     mySig: r.sig || 'POTA',
     mySigInfo: r.ref,
     stationCallsign: myCallsign || '',
@@ -29205,6 +29077,7 @@ function buildActivationAdifQsos(act) {
     name: c.name || '',
     sig: c.sig || '',
     sigInfo: c.sigInfo || '',
+    myRig: c.myRig || '',
     myGridsquare: c.myGridsquare || '',
   })));
 }
@@ -31307,8 +31180,10 @@ async function _buildJtcatCapture(ctx) {
     // JTCAT receiving from the WebSDR (#243): main feeds the engine and sends
     // the same audio here as 12 kHz 'jtcat-vita49-audio' frames.
     var jtcatFromSdr = s.jtcatRxSource === 'websdr';
+    // A Zeus / Thetis rig over TCI: main sends RX1's audio the same way, 12 kHz.
+    var jtcatFromTci = !jtcatFromSdr && s.audioSource === 'tci' && !!(s.catTarget && s.catTarget.type === 'tci');
 
-    if (jtcatFromSdr || s.audioSource === 'smartsdr' || s.audioSource === 'icom-network' || s.audioSource === 'yaesu-lan') {
+    if (jtcatFromSdr || jtcatFromTci || s.audioSource === 'smartsdr' || s.audioSource === 'icom-network' || s.audioSource === 'yaesu-lan') {
       // SmartSDR Direct / Icom Network / Yaesu LAN: JTCAT audio is the PCM stream that
       // main forwards as 'jtcat-vita49-audio' frames — not a Windows
       // audio device. Build a synthetic MediaStream from those frames so
@@ -31335,7 +31210,7 @@ async function _buildJtcatCapture(ctx) {
         if (window.api.jtcatLog) window.api.jtcatLog('[JTCAT] VITA-49 source worklet load failed: ' + (e.message || e));
         throw e;
       }
-      const vita49SourceOptions = jtcatFromSdr
+      const vita49SourceOptions = (jtcatFromSdr || jtcatFromTci)
         ? { sourceRate: 12000 }
         : s.audioSource === 'icom-network'
         ? { sourceRate: 24000, bufferMs: 600, startBufferMs: 150, resumeBufferMs: 200 }
@@ -31352,7 +31227,7 @@ async function _buildJtcatCapture(ctx) {
       jtcatAudioStream = jtcatVita49Dest.stream;
       if (window.api.setJtcatIpAudioReady) window.api.setJtcatIpAudioReady(true);
       if (window.api.jtcatLog) {
-        const label = jtcatFromSdr ? 'WebSDR' : s.audioSource === 'icom-network' ? 'Icom Network audio (RS-BA1)' : 'SmartSDR Direct (VITA-49 dax_rx)';
+        const label = jtcatFromSdr ? 'WebSDR' : jtcatFromTci ? 'TCI (Zeus / Thetis)' : s.audioSource === 'icom-network' ? 'Icom Network audio (RS-BA1)' : 'SmartSDR Direct (VITA-49 dax_rx)';
         const bufferText = s.audioSource === 'icom-network' ? ' with low-latency jitter buffer' : '';
         window.api.jtcatLog(`[JTCAT] Audio source: ${label} via AudioWorklet${bufferText}`);
       }
@@ -31565,7 +31440,7 @@ async function _buildJtcatCapture(ctx) {
     // it. lib/capture-stall.js decides; this resumes or rebuilds. Sound-card
     // capture only: the SmartSDR / Icom-network feed comes from main, and a
     // rebuild here cannot restart it.
-    if (window.CaptureStall && !(jtcatFromSdr || s.audioSource === 'smartsdr' || s.audioSource === 'icom-network' || s.audioSource === 'yaesu-lan')) {
+    if (window.CaptureStall && !(jtcatFromSdr || jtcatFromTci || s.audioSource === 'smartsdr' || s.audioSource === 'icom-network' || s.audioSource === 'yaesu-lan')) {
       jtcatArmStallWatch(audioTrack);
     }
 

@@ -4,7 +4,6 @@
   <meta charset="UTF-8">
   <script src="popout-theme-boot.js"></script>
   <link rel="stylesheet" href="tokens.css">
-  <link rel="stylesheet" href="radio-level-slider.css">
   <title>VFO | W5LEE</title>
   <style>
     /* Three themes, matching styles.css: navy (default), charcoal, light.
@@ -181,6 +180,7 @@
     input[type="range"] { accent-color: var(--blue); color-scheme: dark; }
     [data-theme="light"] input[type="range"] { color-scheme: light; }
     /* TX power sets transmit power: red, like every transmit control. */
+    #vfo-txpower { accent-color: var(--ptt-on); }
 
     /* --- SWR guard card --- */
     .swr-alert { display: none; padding: 16px; background: var(--red-tint); border-radius: 14px; flex-direction: column; gap: 10px; color: var(--red-text); }
@@ -242,7 +242,7 @@
     .seg button:hover { color: var(--t); background: var(--s2); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--t2) 55%, transparent); }
     .seg button.active, .seg button.active:hover { background: var(--blue); color: var(--on-blue); font-weight: 600; box-shadow: none; }
     .filter-row { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--t3); }
-    .filter-row input[type="range"]:not(.radio-level-slider) { flex: 1; }
+    .filter-row input[type="range"] { flex: 1; }
     .filter-val { font-family: 'Cascadia Mono', Consolas, monospace; font-size: 12px; font-weight: 500; color: var(--blue); }
     .controls-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
     .controls-row .spacer { flex: 1; }
@@ -580,7 +580,7 @@
         </div>
         <div class="meter-row" title="Radio audio monitor volume: how loud the click-to-listen (speaker button) audio plays. Independent of your PC's master volume.">
           <span class="meter-label">VOL</span>
-          <input type="range" id="vol-slider" class="radio-level-slider" min="0" max="150" value="100" style="flex:1;min-width:0;" aria-label="Monitor volume">
+          <input type="range" id="vol-slider" min="0" max="150" value="100" style="flex:1;">
           <span class="meter-text" id="vol-text">100%</span>
         </div>
       </div>
@@ -623,16 +623,12 @@
         <label class="filter-row">Width
           <input type="range" id="filter-slider" min="50" max="4000" step="50" value="2400" aria-label="Filter width">
         </label>
-        <label class="filter-row" id="vfo-squelch-row" style="display:none" title="Receiver squelch threshold. Zero turns squelch off.">Squelch
-          <input type="range" id="vfo-squelch" class="radio-level-slider" min="0" max="100" value="0" aria-label="Receiver squelch">
-          <span class="filter-val" id="vfo-squelch-val">Off</span>
-        </label>
       </div>
       <!-- TX power (GitHub #199): the Rig panel's TX Pwr slider, from the same
            caps (vfo-radio-state.rigPower). Hidden on a radio without txpower. -->
       <div class="vfo-section" id="sec-txpower" style="display:none">
         <label class="filter-row">Power
-          <input type="range" id="vfo-txpower" class="radio-level-slider" min="0" max="100" step="1" value="0" aria-label="TX power">
+          <input type="range" id="vfo-txpower" min="0" max="100" step="1" value="0" aria-label="TX power">
           <select class="chip" id="vfo-txpower-select" aria-label="TX power" hidden></select>
           <span class="filter-val" id="vfo-txpower-val">&mdash;</span>
         </label>
@@ -1044,17 +1040,6 @@ if (window.api.onRemotePttReleased) {
   });
 }
 const filterSlider = document.getElementById('filter-slider');
-const vfoSquelchRow = document.getElementById('vfo-squelch-row');
-const vfoSquelch = document.getElementById('vfo-squelch');
-const vfoSquelchValue = document.getElementById('vfo-squelch-val');
-function paintVfoSquelch() {
-  RigPowerView.paintRange(vfoSquelch);
-  vfoSquelchValue.textContent = Number(vfoSquelch.value) ? vfoSquelch.value + '%' : 'Off';
-}
-vfoSquelch.addEventListener('input', paintVfoSquelch);
-vfoSquelch.addEventListener('change', () => {
-  window.api.rigControl({ action: 'set-squelch', value: Number(vfoSquelch.value) });
-});
 const filterVal = document.getElementById('filter-val');
 
 // --- Panes + settings sheet ---
@@ -1180,27 +1165,12 @@ window.api.onRadioState((s) => {
   }
   if (s.txPower != null) currentTxPower = s.txPower; // so "Save profile" can snapshot it
   if (s.rigPower) applyVfoTxPower(s.rigPower);
-  if (s.tciSquelch !== undefined) {
-    vfoSquelchRow.style.display = s.tciSquelch === null ? 'none' : '';
-    if (s.tciSquelch !== null && !vfoSquelch.matches(':active')) {
-      vfoSquelch.value = s.tciSquelch;
-      paintVfoSquelch();
-    }
-  }
   if (s.rfGain != null) currentRfGain = s.rfGain;   // + RF/AF for "Save current" on a rig preset
   if (s.afGain !== undefined) currentAfGain = s.afGain;
   // CAT buttons light from the radio's own state, whichever ones are shown.
   let catChanged = false;
   for (const c of VfoLayout.CAT_CHOICES) {
     if (s[c.state] != null && catState[c.state] !== !!s[c.state]) { catState[c.state] = !!s[c.state]; catChanged = true; }
-  }
-  if (s.zeusNrLevel !== undefined && zeusNrLevel !== s.zeusNrLevel) {
-    zeusNrLevel = s.zeusNrLevel;
-    catChanged = true;
-  }
-  if (s.zeusNbLevel !== undefined && zeusNbLevel !== s.zeusNbLevel) {
-    zeusNbLevel = s.zeusNbLevel;
-    catChanged = true;
   }
   if (catChanged) paintCatButtons();
   if (s.catCaps !== undefined && JSON.stringify(s.catCaps) !== JSON.stringify(vfoCatCaps)) {
@@ -1515,56 +1485,45 @@ const vfoTxPwrRange = document.getElementById('vfo-txpower');
 const vfoTxPwrSelect = document.getElementById('vfo-txpower-select');
 const vfoTxPwrVal = document.getElementById('vfo-txpower-val');
 let vfoTxPwrDecimals = 0;
-let vfoTxPwrUnit = 'W';
 let vfoTxPwrInputAt = 0;
-let vfoTxPwrReadbackTimer;
 const vfoTxPwrSend = RigPowerView.createPowerSender((w) => window.api.rigControl({ action: 'set-tx-power', value: w }));
 function applyVfoTxPower(p) {
   const v = RigPowerView.powerView(p);
   vfoTxPwrSec.style.display = v.shown ? '' : 'none';
   if (!v.shown) return;
   vfoTxPwrDecimals = v.decimals;
-  vfoTxPwrUnit = v.unit;
   vfoTxPwrRange.hidden = v.useSelect;
   vfoTxPwrSelect.hidden = !v.useSelect;
   vfoTxPwrRange.min = v.min;
   vfoTxPwrRange.max = v.max;
   vfoTxPwrRange.step = v.step;
   vfoTxPwrRange.disabled = vfoTxPwrSelect.disabled = !v.enabled;
-  const title = v.unit === '%' ? 'Radio TX drive' : 'Radio TX power';
-  vfoTxPwrSec.title = v.enabled ? title + ': ' + v.min + '–' + v.max + ' ' + v.unit
-    : title + ' (read-only: no live radio power control)';
+  vfoTxPwrSec.title = v.enabled ? 'Radio TX power: ' + v.min + '–' + v.max + ' W'
+    : 'Radio TX power (read-only: no live CAT or SmartSDR power control)';
   const want = v.choices.join('|');
   if (v.useSelect && vfoTxPwrSelect.dataset.choices !== want && document.activeElement !== vfoTxPwrSelect) {
     vfoTxPwrSelect.innerHTML = '';
     for (const c of v.choices) {
       const o = document.createElement('option');
-      o.value = String(c); o.textContent = RigPowerView.formatWatts(c, v.decimals, v.unit);
+      o.value = String(c); o.textContent = RigPowerView.formatWatts(c, v.decimals);
       vfoTxPwrSelect.appendChild(o);
     }
     vfoTxPwrSelect.dataset.choices = want;
   }
   // The echo of our own set is in flight during a drag: leave the thumb alone.
-  clearTimeout(vfoTxPwrReadbackTimer);
-  const wait = 600 - (Date.now() - vfoTxPwrInputAt);
-  if (wait > 0) {
-    vfoTxPwrReadbackTimer = setTimeout(() => applyVfoTxPower(p), wait);
-    return;
-  }
+  const dragging = document.activeElement === vfoTxPwrRange || document.activeElement === vfoTxPwrSelect
+    || (Date.now() - vfoTxPwrInputAt) < 600;
+  if (dragging) return;
   if (v.known) {
     if (v.useSelect) vfoTxPwrSelect.value = v.selectValue;
-    else {
-      vfoTxPwrRange.value = v.watts;
-      RigPowerView.paintRange(vfoTxPwrRange);
-    }
+    else vfoTxPwrRange.value = v.watts;
   }
   vfoTxPwrVal.textContent = v.label;
 }
 function vfoTxPwrInput(el) {
   vfoTxPwrInputAt = Date.now();
   const w = parseFloat(el.value);
-  vfoTxPwrVal.textContent = RigPowerView.formatWatts(w, vfoTxPwrDecimals, vfoTxPwrUnit);
-  if (el === vfoTxPwrRange) RigPowerView.paintRange(el);
+  vfoTxPwrVal.textContent = RigPowerView.formatWatts(w, vfoTxPwrDecimals);
   vfoTxPwrSend(w);
 }
 vfoTxPwrRange.addEventListener('input', () => vfoTxPwrInput(vfoTxPwrRange));
@@ -1622,26 +1581,17 @@ vfoTxPwrSelect.addEventListener('change', () => { vfoTxPwrInput(vfoTxPwrSelect);
   });
 })();
 
-// CAT buttons are configurable per size. A saved Large selection overrides rig defaults.
-let vfoCatLarge = null;
+// CAT buttons: the operator picks them per size (VFO settings > CAT buttons),
+// from the controls this radio takes (main's catCaps). The Large VFO always
+// had NB and ATU, so those are its defaults (VfoLayout.CAT_DEFAULT_LARGE).
+let vfoCatLarge = VfoLayout.CAT_DEFAULT_LARGE.slice();
 let vfoSmall = VfoLayout.normalizeSmall(null);   // settings.vfoSmall: { order, on, cat }
 let vfoCatCaps = null;       // null until the radio is known: offer them all
-let zeusNrLevel = null;
-let zeusNbLevel = null;
 const catState = {};         // vfo-radio-state field -> on, e.g. { nb: true }
-function largeCatPicks() {
-  return vfoCatLarge ?? (vfoCatCaps?.tci ? VfoLayout.CAT_DEFAULT_SMALL : VfoLayout.CAT_DEFAULT_LARGE);
-}
-function catPicksFor(row) { return row.id === 'mini-cat' ? vfoSmall.cat : largeCatPicks(); }
+function catPicksFor(row) { return row.id === 'mini-cat' ? vfoSmall.cat : vfoCatLarge; }
 function paintCatButtons() {
   document.querySelectorAll('.cat-builtin').forEach(b => {
-    const state = b.dataset.state;
-    if (!state) return;
-    const on = !!catState[state];
-    b.classList.toggle('on', on);
-    b.setAttribute('aria-pressed', String(on));
-    if (state === 'nr') b.textContent = zeusNrLevel > 0 ? `NR${zeusNrLevel}` : 'NR';
-    if (state === 'nb') b.textContent = zeusNbLevel > 0 ? `NB${zeusNbLevel}` : 'NB';
+    if (b.dataset.state) b.classList.toggle('on', !!catState[b.dataset.state]);
   });
 }
 function buildRigToggles() {
@@ -1661,11 +1611,6 @@ function buildRigToggles() {
         if (c.momentary) { window.api.rigControl({ action: c.action }); return; }
         // The handlers read data.value (main.js): the field name must match.
         const on = !catState[c.state];
-        if ((c.action === 'set-nr' && zeusNrLevel !== null)
-            || (c.action === 'set-nb' && zeusNbLevel !== null)) {
-          window.api.rigControl({ action: c.action, value: on, cycle: true });
-          return;
-        }
         catState[c.state] = on;
         window.api.rigControl({ action: c.action, value: on });
         paintCatButtons();
@@ -1673,7 +1618,6 @@ function buildRigToggles() {
       row.insertBefore(btn, before);
     }
   });
-  paintCatButtons();
 }
 buildRigToggles();
 // Custom CAT buttons injected after rig toggles since they share the same row
@@ -2669,7 +2613,7 @@ function renderLargeLists() {
       },
     }));
     if (k === 'controls' && on) {
-      body.appendChild(catPicker(largeCatPicks(), (next) => {
+      body.appendChild(catPicker(vfoCatLarge, (next) => {
         vfoCatLarge = next;
         window.api.saveSettings({ vfoCatLarge });
         buildRigToggles();
@@ -2791,7 +2735,7 @@ document.getElementById('large-reset').addEventListener('click', () => {
   applyOrder();
   vfoWidgets = { ...DEFAULT_WIDGETS };
   vfoSections = { ...DEFAULT_SECTIONS };
-  vfoCatLarge = null;
+  vfoCatLarge = VfoLayout.CAT_DEFAULT_LARGE.slice();
   window.api.saveSettings({ vfoOrder, vfoCatLarge });
   saveWidgets();
   applyWidgets(); applySections(); syncSettingsCheckboxes(); buildRigToggles();
@@ -2814,7 +2758,7 @@ async function loadWidgets() {
   vfoOrder = normalizeOrder(s.vfoOrder);
   applyOrder();
   vfoSmall = VfoLayout.normalizeSmall(s.vfoSmall);
-  vfoCatLarge = Array.isArray(s.vfoCatLarge) ? VfoLayout.normalizeCat(s.vfoCatLarge) : null;
+  vfoCatLarge = VfoLayout.normalizeCat(s.vfoCatLarge, VfoLayout.CAT_DEFAULT_LARGE);
   buildRigToggles();
   buildCustomCatBtns();
   if (vfoMini) applyMini();
@@ -4131,15 +4075,14 @@ let audioMonitorStream = null;
 let audioMonitorGain = null;
 let audioMonitorActive = false;
 let audioMonitorMuted = false;
-let audioMonitorDirect = false;   // true = playing receive audio delivered by the radio connection
+let audioMonitorDirect = false;   // true = playing the SmartSDR Direct VITA-49 stream
 let audioMonitorNextPlay = 0;     // AudioContext play cursor for direct-mode packets
 let audioMonitorLabel = '';       // the capture device's name (#247: follow it by name)
 let audioReattachPending = false; // #247: a power-on / dead stream waits for a reopen
 // Radio audio monitor volume (0–1.5). Drives the monitor's GainNode so the
 // user can throttle click-to-listen audio without touching the PC's master
 // volume. Persisted as a 0–150 percentage.
-const savedMonitorVolume = parseInt(localStorage.getItem('vfoMonitorVolume'), 10);
-let monitorVolume = Number.isFinite(savedMonitorVolume) ? Math.max(0, Math.min(150, savedMonitorVolume)) / 100 : 1;
+let monitorVolume = (parseInt(localStorage.getItem('vfoMonitorVolume') || '100', 10) || 100) / 100;
 
 // opts.deviceId: the input to open instead of the saved one — a reattach
 // after a power cycle that followed the CODEC to a new ID (#247).
@@ -4149,7 +4092,8 @@ async function startAudioMonitor(opts) {
     const s = await window.api.getSettings();
     // The SCU-LAN10's receive audio is network packets too: without it here
     // the button lit up and played the room microphone (review of the LAN work).
-    if (s.tciRx || s.tciRxTest || s.audioSource === 'smartsdr' || s.audioSource === 'icom-network' || s.audioSource === 'yaesu-lan') {
+    if (s.audioSource === 'smartsdr' || s.audioSource === 'icom-network' || s.audioSource === 'yaesu-lan' || s.audioSource === 'tci') {
+      // A TCI rig (Zeus / Thetis) streams RX1 the same way (lib/tci-rig.js).
       // Icom Network is the same: its RX audio arrives as packets, and the
       // capture branch below opened this computer's MIC (feedback, no radio).
       // SmartSDR Direct: the Windows DAX RX device is silent (no DAX program
@@ -4325,7 +4269,7 @@ audioBtn.addEventListener('contextmenu', (e) => {
   audioReattachPending = false;
 });
 
-// Network RX audio — play the frames POTACAT receives, but
+// SmartSDR Direct RX audio — play the VITA-49 frames POTACAT receives, but
 // only while the monitor is on AND we're in direct mode. Mirrors the KiwiSDR
 // player: schedule packets back-to-back with a play cursor, snapping the
 // cursor back if a burst pushes it more than 500 ms ahead of now.
@@ -4357,11 +4301,9 @@ window.api.onSmartSdrAudio((d) => {
   if (!slider || !label) return;
   const pct = Math.round(monitorVolume * 100);
   slider.value = pct;
-  RigPowerView.paintRange(slider);
   label.textContent = pct + '%';
   slider.addEventListener('input', () => {
     const p = parseInt(slider.value, 10) || 0;
-    RigPowerView.paintRange(slider);
     label.textContent = p + '%';
     monitorVolume = p / 100;
     localStorage.setItem('vfoMonitorVolume', String(p));
@@ -4845,7 +4787,7 @@ window.api.onKiwiAudio((d) => {
     if (kiwiGainNode) kiwiGainNode.gain.value = kiwiVolume;
     const vs = document.getElementById('vol-slider');
     const vl = document.getElementById('vol-text');
-    if (vs) { vs.value = pct; RigPowerView.paintRange(vs); }
+    if (vs) vs.value = pct;
     if (vl) vl.textContent = pct + '%';
   });
 })();

@@ -28,6 +28,7 @@ const TESTS = [
   'test/echocat-connect-diet-test.js',
   'test/cw-live-watchdog-test.js',
   'test/yaesu-cw-text-test.js',
+  'test/ftx1-cw-stuck-stop-test.js',
   'test/yaesu-audit-ft991a-test.js', // Yaesu CAT audit: FT-991A widths, AGC, ATT, PROC, power floor, CW text, RTTY-U
   'test/cw-stuck-wiring-test.js',
   'test/cw-tx-lockout-timer-test.js', // #583: the TX lockout ends when its timer fires a millisecond early
@@ -57,6 +58,12 @@ const TESTS = [
   'test/rig-controls-test.js',
   'test/rig-gain-steps-test.js',
   'test/rig-family-test.js',
+  'test/tci-rig-test.js', // #195 (w5lee #632): Zeus / Thetis TCI link against a fake server; receive and control only
+  'test/tci-gating-test.js', // #195: TCI branches gated on the TCI rig; every TX entry point refuses it
+  'test/tci-audio-test.js', // #195: TCI RX1 audio into JTCAT, the VFO monitor and ECHOCAT
+  'test/tci-scope-test.js', // #195: the band scope from a TCI server's float32 IQ
+  'test/tci-tx-safety-test.js', // #195 #185: TCI transmit rules against a fake Zeus and Thetis (release, stall, cap, DIGU, Thetis RX-only)
+  'test/tci-tx-wiring-test.js', // #195: JTCAT and ECHOCAT voice reach TCI transmit only through the existing guards
   'test/rigctld-attribution-test.js',
   'test/flrig-codec-test.js',
   'test/cw-text-unsupported-link-test.js',
@@ -140,6 +147,7 @@ const TESTS = [
   'test/privileges-one-source-test.js', // #250: lib/privileges.js is the one table (renderer loads it); unverified classes never refuse TX; no change vs master
   'test/privileges-verified-gate-test.js', // #250: the ATU wizard and Guest Pass never refuse for an unverified licence class
   'test/rigctld-power-scale-test.js',
+  'test/rigctld-yaesu-power-read-test.js', // a Yaesu on rigctld reads its power with w PC; (#656); non-Yaesu rigs still send l RFPOWER
   'test/rigctld-kenwood-power-test.js', // a TS-590/TS-2000 behind Hamlib keeps its power: raw PC, never Hamlib's PC000/PC255 probe
   'test/jtcat-tx-watchdog-test.js',
   'test/jtcat-replace-log-test.js',
@@ -148,6 +156,9 @@ const TESTS = [
   'test/pota-parks-db-test.js',
   'test/elecraft-data-mode-test.js',
   'test/elecraft-atu-tune-test.js', // Elecraft tunes with SWT (K3 19, KX3 44, KX2 20 by OM;), never AC
+  'test/ts590-atu-ac111-test.js', // TS-590S/SG starts a tune with AC111; per its PC command guide (VA2PSL #635); other Kenwoods keep AC011;
+  'test/freedv-ptt-refusal-test.js', // FDV1: voice PTT refused in FreeDV modes until FreeDV transmit exists; one sentence on every surface
+  'test/freedv-echocat-test.js', // FDV1: decoded FreeDV speech on the ECHOCAT track, freedv-status, protocol drift fixed (agreed with ECHOCAT)
   'test/kenwood-filter-width-test.js',
   'test/cw-key-port-race-test.js',
   'test/guest-pass-emission-test.js',
@@ -250,6 +261,7 @@ const TESTS = [
   'test/ftdx5000-power-scale-test.js', // FTDX5000 PC is 000-255, not watts (nicki3fiy 254 W)
   'test/yaesu-audit-ftdx10-test.js', // Yaesu CAT audit: FTDX10 width SH00nn + Table 3, AGC GT0 order, MD0 9/E/F, PC 5-100 (2308-F)
   'test/yaesu-audit-ftdx101-test.js', // Yaesu CAT audit: FTDX101 width SH00nn + its Table 3, AGC GT0 order, MD0 9/E/F, PC from 5 (2308-L)
+  'test/yaesu-sd-break-in-delay-test.js', // Yaesu CAT audit: FT-710/FTDX10/FTDX101 SD is a two-digit index 00-33, sent and read
   'test/tx-audio-input-test.js', // TS-480/590/890/990 transmit audio input per rig; TS-480 asks on first transmit (#594)
   'test/rig-list-a11y-test.js', // #603: every rig-list control names its rig for VoiceOver
   'test/split-first-tune-test.js', // #113 item 2: no split OFF unless POTACAT turned split on
@@ -327,7 +339,6 @@ const TESTS = [
   'test/mac-mic-access-test.js', // #463: a Mac that refuses the microphone is named, logged and in Report a Bug
   'test/capture-stall-test.js', // kc8zp_ryan: JTCAT capture rebuilt when the OS mutes/suspends it or it stops delivering
   'test/jtcat-capture-gate-test.js', // #133: a remote-started FT8 capture is restarted like a desktop one; one capture build at a time
-  'test/tci-jtcat-rx-test.js',
   'test/jtcat-log-comment-test.js', // dcxweaver: the "JTCAT FT8" COMMENT is optional (default on)
   'test/vfo-sdr-volume-test.js', // #118 df1vb: the SDR Volume row stands in when the VOL knob is hidden
   'test/wspr-power-memory-test.js',
@@ -335,6 +346,8 @@ const TESTS = [
   'test/wspr-beacon-power-test.js', // #268: the beacon keeps the operator's RF power; rigctld reports the radio's power
   'test/wspr-reported-dbm-test.js', // #268: the beacon reports the power it runs at (5 W = 37 dBm), or the operator's fixed pick, 0..60 dBm
   'test/js8-native-test.js',
+  'test/rade-native-test.js',
+  'test/freedv-playback-test.js',
   'test/js8-varicode-test.js',
   'test/js8-qso-test.js',
   'test/js8-rx-assembler-test.js',
@@ -466,6 +479,8 @@ const TESTS = [
   'test/pota-sync-login-test.js',
   'test/pota-sync-log-test.js', // #406: the pota.app Connect step logs names and lengths, never a value
   'test/qso-expand-test.js',
+  'test/qso-my-rig-test.js', // #633 (w5lee): the radio a contact was logged on is ADIF MY_RIG; Logbook Rig column
+  'test/qso-log-source-test.js', // #634 (w5lee): ECHOCAT contacts carry APP_POTACAT_LOG_SOURCE; Logbook Source column
   'test/dxcc-codes-test.js', // #554: logged contacts carry the ADIF DXCC entity number
   'test/sota-chase-test.js', // #191: a POTA-primary record carrying a sotaRef uploads its SOTA chase
   'test/spot-programs-test.js', // POTA + SOTA spot: both pills, summit in the Ref column

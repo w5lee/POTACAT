@@ -100,7 +100,9 @@ const ALL_COLUMNS = [
     get: (q) => q.APP_POTACAT_LOG_SOURCE || '' },
   { key: 'BAND', label: 'Band', sort: 'BAND', w: 52, get: (q) => q.BAND || '' },
   { key: 'TX_PWR', label: 'Pwr', sort: 'TX_PWR', field: 'TX_PWR', w: 46, get: (q) => q.TX_PWR || '' },
-  { key: 'MY_RIG', label: 'Rig', sort: 'MY_RIG', field: 'MY_RIG', w: 100, get: (q) => q.MY_RIG || '' },
+  // ADIF MY_RIG: the radio this contact was logged on (#633). Off by default:
+  // only an operator who switches radios needs it.
+  { key: 'MY_RIG', label: 'Rig', sort: 'MY_RIG', field: 'MY_RIG', w: 100, off: true, get: (q) => q.MY_RIG || '' },
   { key: 'RST_SENT', label: 'RST S', field: 'RST_SENT', w: 48, get: (q) => q.RST_SENT || '' },
   { key: 'RST_RCVD', label: 'RST R', field: 'RST_RCVD', w: 48, get: (q) => q.RST_RCVD || '' },
   // POTA_REF alone: a log imported from QLog before the import filled SIG_INFO (KC9FOZ).
