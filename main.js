@@ -20848,7 +20848,7 @@ function startJtcat(mode) {
 
   const studyEngine = ft8Engine;
   studyEngine.shouldDeferFt8Tx = (periodStartMs, slot) => {
-    if (studyEngine !== ft8Engine || !tciJtcatQsoMode() || !studyEngine._autoSeq) return false;
+    if (studyEngine !== ft8Engine || !tciRigLinked() || !studyEngine._autoSeq) return false;
     const qso = [popoutJtcatQso, remoteJtcatQso].find(q => q && q.txMsg === studyEngine._txMessage);
     return ft8RetryStudy.defer(qso, { periodStartMs, slot, dialHz: _currentFreqHz,
       offsetHz: studyEngine._txFreq, hold: settings.jtcatHoldTxFreq });
