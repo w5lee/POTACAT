@@ -62,3 +62,25 @@ test('AF volume alone adjusts when fixed gain is unavailable', async () => {
   level.feed(new Float32Array(60000).fill(0.25));
   assert.equal((await pending).fixedGain, null);
 });
+test('Zeus confirms fixed gain through its engine API with rounded AF readback', async () => {
+  const s = { connected: true, transmitting: false, busy: false, rxDial: 7074000, tciMode: 'DIGU', agc: 'off', volumeDb: 0, fixedGain: null, thetis: false };
+  let engineGain = 20;
+  const level = createRxLevel({ state: () => ({ ...s }), peak: () => {}, getFixedGain: async () => engineGain,
+    send: line => {
+      const gain = line.match(/agc_gain:0,(-?[\d.]+);/);
+      if (gain) engineGain = Number(gain[1]);
+      const volume = line.match(/rx_volume:0,0,(-?[\d.]+);/);
+      if (volume) s.volumeDb = Math.round(Number(volume[1]));
+      return true;
+    } });
+  const pending = level.adjust();
+  level.feed(new Float32Array(60000).fill(0.8));
+  await wait(250);
+  assert.equal(s.fixedGain, null);
+  assert.ok(Math.abs(s.volumeDb) < 0.01);
+  assert.equal(engineGain, 10);
+  level.feed(new Float32Array(60000).fill(0.25));
+  const result = await pending;
+  assert.equal(result.error, undefined);
+  assert.equal(result.fixedGain, 10);
+});
