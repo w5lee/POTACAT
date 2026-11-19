@@ -115,3 +115,30 @@ test('main.js routes TCI audio to JTCAT, the VFO monitor and ECHOCAT', () => {
   const vfo = readSrc(path.join(ROOT, 'renderer', 'vfo-popout.html'));
   assert.match(vfo, /s\.audioSource === 'yaesu-lan' \|\| s\.audioSource === 'tci'\) \{/);
 });
+
+test('TCI RX level measures streamed PCM and confirms radio AF adjustment', async () => {
+  const server = await startFakeTciServer();
+  const peaks = [];
+  const rig = TciRig.connectTciRig({ host: '127.0.0.1', port: server.port, server: 'zeus', audio: true,
+    on: { rxPeak: level => peaks.push(level) } });
+  try {
+    await until(() => rig.connected);
+    server.send('rx_volume:0,0,0;');
+    await wait(20);
+    const pending = rig.autoRxLevel();
+    const frame = rxAudioFrame(new Float32Array(3000).fill(0.5));
+    for (let i = 0; i < 20; i++) server.send(frame);
+    await until(() => server.frames.some(line => /rx_volume:0,0,-/.test(line)));
+    const write = server.frames.find(line => /rx_volume:0,0,-/.test(line));
+    const db = write.match(/rx_volume:0,0,(-?[\d.]+);/)[1];
+    server.send(`rx_volume:0,0,${db};`);
+    await wait(350);
+    const adjusted = rxAudioFrame(new Float32Array(3000).fill(0.25));
+    for (let i = 0; i < 20; i++) server.send(adjusted);
+    const result = await pending;
+    assert.equal(result.error, undefined);
+    assert.equal(result.adjustments, 1);
+    assert.ok(result.volumeDb < -5);
+    assert.ok(peaks.length > 0);
+  } finally { rig.close(); await server.close(); }
+});

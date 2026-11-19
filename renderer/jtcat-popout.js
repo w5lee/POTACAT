@@ -5840,6 +5840,49 @@ function _applyPopoutTheme(payload) {
   // pre-sync builds; the settings value wins when present.
   var jpRxGain = document.getElementById('jp-rx-gain');
   var jpRxGainVal = document.getElementById('jp-rx-gain-val');
+  var jpTciAutoRx = document.getElementById('jp-tci-auto-rx');
+  var jpTciRxResult = document.getElementById('jp-tci-rx-result');
+  var jpTciRxResultTimer;
+  var jpTciRxPeak = document.getElementById('jp-tci-rx-peak');
+  var jpTciPeakTimer;
+  var jpTciClipUntil = 0;
+  function jpClearTciPeak() {
+    clearTimeout(jpTciPeakTimer);
+    jpTciClipUntil = 0;
+    jpTciRxPeak.textContent = 'Peak —';
+    jpTciRxPeak.classList.remove('near-clip');
+  }
+  if (window.api.onTciRxPeak) window.api.onTciRxPeak(function(level) {
+    if (jpTciRxPeak.classList.contains('hidden')) return;
+    clearTimeout(jpTciPeakTimer);
+    if (level.nearClip) jpTciClipUntil = Date.now() + 1000;
+    const nearClip = Date.now() < jpTciClipUntil;
+    jpTciRxPeak.classList.toggle('near-clip', nearClip);
+    const peak = Number.isFinite(level.peakDb) ? Math.round(level.peakDb) + ' dBFS' : '—';
+    jpTciRxPeak.textContent = 'Peak ' + peak + (nearClip ? ' · Near clip' : '');
+    jpTciPeakTimer = setTimeout(jpClearTciPeak, 1000);
+  });
+  jpTciAutoRx.addEventListener('click', async function() {
+    clearTimeout(jpTciRxResultTimer);
+    jpTciAutoRx.disabled = true;
+    jpTciRxResult.textContent = 'Measuring and adjusting RX audio…';
+    try {
+      const result = await window.api.jtcatAutoTciRxLevel();
+      if (result.error) {
+        jpTciRxResult.textContent = result.error;
+        return;
+      }
+      const levels = [Math.round(result.peakDb) + ' dBFS peak', 'AF trim ' + result.volumeDb.toFixed(1) + ' dB'];
+      if (Number.isFinite(result.fixedGain)) levels.push('Fixed gain ' + result.fixedGain + ' dB');
+      levels.push(result.limited ? 'gain limit reached' : result.iterationLimit ? 'stopped after four adjustments' : 'level OK');
+      jpTciRxResult.textContent = levels.join(' · ');
+      jpTciRxResultTimer = setTimeout(function () { jpTciRxResult.textContent = ''; }, 5000);
+    } catch (error) {
+      jpTciRxResult.textContent = error.message;
+    } finally {
+      jpTciAutoRx.disabled = false;
+    }
+  });
   function jpApplyRxGainPct(pct, persistLocal) {
     pct = Math.round(Number(pct));
     if (!isFinite(pct)) return;
@@ -6310,6 +6353,9 @@ function _applyPopoutTheme(payload) {
   async function startPopoutAudio(deviceId, audioSource) {
     _lastAudioArgs = { deviceId: deviceId, audioSource: audioSource };
     jpSetDriveRelevance(audioSource);
+    jpClearTciPeak();
+    jpTciAutoRx.classList.toggle('hidden', audioSource !== 'tci' || remoteShackMode);
+    jpTciRxPeak.classList.toggle('hidden', audioSource !== 'tci' || remoteShackMode);
     _audioStartStage = 'stop-old';
     if (_audioStartWatchdog) clearTimeout(_audioStartWatchdog);
     _audioStartWatchdog = setTimeout(function () {

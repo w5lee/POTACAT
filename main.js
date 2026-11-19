@@ -24533,6 +24533,15 @@ function connectTciRig() {
   const { smeterFromDbm } = require('./lib/codecs/flrig-codec');
   const rig = TciRig.connectTciRig({
     host: t.host, port: t.port, server: t.server, autoStart: t.autoStart,
+    getFixedGain: async () => {
+      if (t.server !== 'zeus' || !['127.0.0.1', 'localhost', '::1'].includes(t.host)) return null;
+      const engine = await require('./lib/zeus-engine-port').findZeusEngineState(target.enginePort);
+      if (!engine) throw new Error('Zeus fixed gain is unavailable. Check the local Zeus engine connection.');
+      if (engine.state.status !== 'Connected' || engine.state.agc.mode !== 'Fixed' || engine.state.autoAgcEnabled !== false) {
+        throw new Error('Zeus must be connected with fixed gain and Auto AGC off');
+      }
+      return engine.state.agc.fixedGainDb ?? 20;
+    },
     audio: settings.audioSource === 'tci', // the rig's audio source (lib/rig-family.js)
     driveCapPct: tciDriveCapPct,
     log: (m) => sendCatLog(`[TCI] ${m}`),
@@ -24579,6 +24588,9 @@ function connectTciRig() {
         broadcastRigState();
       },
       txMeter(kind, value) { if (tciRig === rig) tciRigTxMeter(kind, value); },
+      rxPeak(level) {
+        if (tciRig === rig && jtcatPopoutWin && !jtcatPopoutWin.isDestroyed()) jtcatPopoutWin.webContents.send('jtcat-tci-rx-peak', level);
+      },
       audio(pcm) { if (tciRig === rig) tciRigAudio(pcm); },
       iq(payload, rate, center) { if (tciRig === rig && tciScopeOn) feedTciScope(payload, rate, center); },
     },
@@ -53449,6 +53461,13 @@ function cloudShackNotice(text, kind) {
   // RX gain reports from any window's slider — synced everywhere else. The JS8
   // popout shares the same value and channel; tag its origin so the echo skips
   // the slider being dragged.
+  ipcMain.handle('jtcat-auto-tci-rx-level', async () => {
+    if (!tciRigTarget() || !tciRigLinked()) return { error: 'Connect a TCI rig first' };
+    if (jtcatAnyTxActive() || ft8Engine?._txEnabled) return { error: 'Halt TX before measuring RX level' };
+    const result = await tciRig.autoRxLevel();
+    sendCatLog('[TCI] Auto RX Level: ' + (result.error || `${result.peakDb.toFixed(1)} dBFS peak, AF trim ${result.volumeDb.toFixed(1)} dB`));
+    return result;
+  });
   ipcMain.on('jtcat-set-rx-gain', (e, level) => {
     const fromPopout = jtcatPopoutWin && !jtcatPopoutWin.isDestroyed() && e.sender === jtcatPopoutWin.webContents;
     const fromJs8 = js8PopoutWin && !js8PopoutWin.isDestroyed() && e.sender === js8PopoutWin.webContents;

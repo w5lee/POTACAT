@@ -60,6 +60,7 @@ const TESTS = [
   'test/rig-family-test.js',
   'test/tci-rig-test.js', // #195 (w5lee #632): Zeus / Thetis TCI link against a fake server; receive and control only
   'test/tci-gating-test.js', // #195: TCI branches gated on the TCI rig; every TX entry point refuses it
+  'test/tci-rx-level-test.js', // personal TCI RX auto level and peak measurement
   'test/tci-audio-test.js', // #195: TCI RX1 audio into JTCAT, the VFO monitor and ECHOCAT
   'test/tci-scope-test.js', // #195: the band scope from a TCI server's float32 IQ
   'test/tci-tx-safety-test.js', // #195 #185: TCI transmit rules against a fake Zeus and Thetis (release, stall, cap, DIGU, Thetis RX-only)
