@@ -41799,7 +41799,7 @@ function displayMode() { return sdrHoldsDial() ? (listenSdr.mode || _currentMode
 /** The active radio's receive ranges, or null with no radio to hear through. */
 function rigReachNow() {
   const noCat = !!(settings.catTarget && settings.catTarget.type === 'none');
-  const linked = !!((cat && cat.connected) || (smartSdr && smartSdr.connected) || noCat);
+  const linked = !!((cat && cat.connected) || (smartSdr && smartSdr.connected) || tciRigLinked() || noCat);
   if (!linked) return null;
   let model = null;
   try { model = getActiveRigModel(); } catch { /* no model */ }

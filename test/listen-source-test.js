@@ -201,6 +201,20 @@ check('main uses it for a rig known only by its bands; a published range still w
   assert.ok(/if \(model && Array\.isArray\(model\.rxHz\) && model\.rxHz\.length\) return model\.rxHz;/.test(body));
   assert.ok(/return ListenSource\.generalCoverage\(out\) \|\| \[\[0, Infinity\]\];/.test(body));
 });
+check('a connected TCI radio can receive a tune; a disconnected one cannot', () => {
+  const at = main.indexOf('function rigReachNow()');
+  const body = main.slice(at, main.indexOf('\n}', at) + 2);
+  const context = {
+    settings: { catTarget: { type: 'tci' } }, cat: null, smartSdr: null,
+    tciRigLinked: () => true,
+    getActiveRigModel: () => ({ rxHz: [[30000, 30000000]] }),
+  };
+  const vm = require('vm');
+  const reach = vm.runInNewContext(body + '\nrigReachNow()', context);
+  assert.strictEqual(L.decide(7074000, reach, null).source, 'rig');
+  context.tciRigLinked = () => false;
+  assert.strictEqual(vm.runInNewContext(body + '\nrigReachNow()', context), null);
+});
 check('main has BANDS in scope (hoogskev 11-01: the loop threw a ReferenceError, so every rig fell to the catch)', () => {
   assert.ok(/const \{[^}]*BANDS[^}]*\} = require\('\.\/lib\/bands'\)/.test(main), 'BANDS imported from lib/bands');
   // Run the loop body as main does, with the real table: an FTX-1's bands reach 70 cm.
